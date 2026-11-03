@@ -1,0 +1,18 @@
+# Ortam ve bağımlılıklar (yeniden kurulabilir)
+.venv/
+backend/venv/
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+
+# Yerel veriler: müşteri bilgileri, şifre özetleri ve yüklenen tapu görselleri
+backend/db.sqlite3
+backend/*.bak
+backend/media/
+
+# Editör ve sistem dosyaları
+.DS_Store
+.claude/
+.vscode/
+.idea/
