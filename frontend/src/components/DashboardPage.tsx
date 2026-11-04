@@ -23,7 +23,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import TurkeyMapModule from 'react-turkey-map';
 import { getAuditLogs, getCurrentUser, getLands, getSalesLeaderboard } from '../api';
 import type { AuditLogEntry } from '../api';
@@ -506,6 +506,7 @@ function CityDistrictModal({ city, lands, onClose }: { city: string; lands: Land
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const [period, setPeriod] = useState<Period>('month');
   const [customRange, setCustomRange] = useState<DateRange>(() => {
     const today = new Date();
@@ -535,6 +536,19 @@ export default function DashboardPage() {
     () => ({ dateFrom: toLocalISODate(bounds.from), dateTo: toLocalISODate(new Date(bounds.to.getTime() - 1)) }),
     [bounds],
   );
+
+  // Kişinin rapor sayfası; dashboard'da seçili dönem rapora da aynen taşınır.
+  const personReportUrl = (username: string) => {
+    const query = new URLSearchParams({ kisi: username });
+    if (period === 'month' || period === 'year') {
+      query.set('donem', period);
+    } else {
+      query.set('donem', 'custom');
+      query.set('baslangic', apiRange.dateFrom);
+      query.set('bitis', apiRange.dateTo);
+    }
+    return `/reports/person?${query.toString()}`;
+  };
 
   const { data: currentUser } = useQuery({ queryKey: ['currentUser'], queryFn: getCurrentUser });
   const landsQuery = useQuery({ queryKey: ['lands'], queryFn: getLands });
@@ -1075,13 +1089,26 @@ export default function DashboardPage() {
                   {leaderboard.map((row, index) => {
                     const conversion = row.reservations > 0 ? Math.round((row.sales / row.reservations) * 100) : null;
                     return (
-                      <tr key={row.username} className="transition-colors hover:bg-slate-50">
+                      <tr
+                        key={row.username}
+                        onClick={() => navigate(personReportUrl(row.username))}
+                        className="group cursor-pointer transition-colors hover:bg-blue-50/50"
+                      >
                         <td className="px-2 py-3.5">
                           <span className="flex h-6 w-6 items-center justify-center rounded-md bg-slate-100 text-xs font-semibold text-slate-600">
                             {index + 1}
                           </span>
                         </td>
-                        <td className="truncate px-2 py-2.5 font-medium text-slate-800">{row.username}</td>
+                        <td className="truncate px-2 py-2.5">
+                          <Link
+                            to={personReportUrl(row.username)}
+                            onClick={event => event.stopPropagation()}
+                            title={`${row.username} raporunu aç`}
+                            className="font-medium text-slate-800 group-hover:text-blue-600 hover:underline"
+                          >
+                            {row.username}
+                          </Link>
+                        </td>
                         <td className="px-2 py-2.5 text-slate-700">{row.sales}</td>
                         <td className="whitespace-nowrap px-2 py-2.5 text-slate-700">{formatCurrency(Number(row.amount))}</td>
                         <td className="px-2 py-2.5" title={`${row.reservations} rezervasyon, ${row.sales} satış`}>
@@ -1128,7 +1155,16 @@ export default function DashboardPage() {
                   <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold text-slate-800">{title}</p>
-                      <p className="mt-0.5 truncate text-sm text-slate-500">{location}</p>
+                      <p className="mt-0.5 truncate text-sm text-slate-500">
+                        {location} ·{' '}
+                        <Link
+                          to={personReportUrl(entry.actor_username)}
+                          title={`${entry.actor_username} raporunu aç`}
+                          className="font-medium text-slate-600 hover:text-blue-600 hover:underline"
+                        >
+                          {entry.actor_username}
+                        </Link>
+                      </p>
                     </div>
                     <p className="shrink-0 text-xs text-slate-400">{formatRelative(entry.created_at)}</p>
                   </div>
