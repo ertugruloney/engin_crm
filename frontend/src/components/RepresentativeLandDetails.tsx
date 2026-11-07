@@ -6,6 +6,7 @@ import { updateRepresentativeLandNotes } from '../api';
 import type { RepresentativeLand } from '../api';
 import { statusColors, statusLabels } from '../types';
 import LandHistory from './LandHistory';
+import LandLocationCard from './LandLocationCard';
 
 interface RepresentativeLandDetailsProps {
   land: RepresentativeLand;
@@ -85,6 +86,8 @@ export default function RepresentativeLandDetails({
               {statusLabels[land.status]}
             </span>
           </div>
+
+          <LandLocationCard land={land} canEdit={false} />
 
           {canViewReservationDetails && land.status !== 'BOS' && (
             <section className="space-y-4">

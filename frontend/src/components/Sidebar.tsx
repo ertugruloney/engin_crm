@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { BarChart3, Briefcase, Calendar, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Home, List, Map, MapPin, Settings, UploadCloud, UserRound, Users } from 'lucide-react';
+import { BarChart3, Briefcase, Calendar, Contact, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Home, List, Map, MapPin, Settings, UploadCloud, UserRound, Users } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import type { UserRole } from '../api';
@@ -54,6 +54,8 @@ const SALES_LINKS: MenuLink[] = [
   { icon: UploadCloud, label: 'Toplu Arsa Ekle', path: '/import' },
 ];
 
+const CUSTOMERS_LINK: MenuLink = { icon: Contact, label: 'Müşteriler', path: '/customers' };
+
 const REPORT_LINKS: MenuLink[] = [
   { icon: MapPin, label: 'Bölgelere Göre', path: '/reports/region' },
   { icon: UserRound, label: 'Kişilere Göre', path: '/reports/person' },
@@ -80,6 +82,7 @@ export default function Sidebar({ role, mobileOpen, onMobileClose }: SidebarProp
   const adminMenuItems: MenuItem[] = [
     { icon: Home, label: 'Ana Sayfa', path: '/' },
     { icon: Briefcase, label: 'Satış Yönetimi', children: SALES_LINKS },
+    CUSTOMERS_LINK,
     { icon: BarChart3, label: 'Raporlar', children: REPORT_LINKS },
     { icon: Users, label: 'Kullanıcı Yönetimi', path: '/users' },
     { icon: ClipboardList, label: 'Denetim Kayıtları', path: '/audit-logs' },
@@ -89,7 +92,7 @@ export default function Sidebar({ role, mobileOpen, onMobileClose }: SidebarProp
   const menuItems: MenuItem[] = role === 'admin'
     ? adminMenuItems
     : role === 'sales_support'
-      ? SALES_LINKS
+      ? [...SALES_LINKS, CUSTOMERS_LINK]
       : [{ icon: Map, label: 'Arsalar', path: '/available-lands' }];
   const homePath = role === 'admin' ? '/' : role === 'sales_support' ? '/board' : '/available-lands';
 
@@ -106,7 +109,7 @@ export default function Sidebar({ role, mobileOpen, onMobileClose }: SidebarProp
       to={item.path}
       onClick={onMobileClose}
       title={collapsed ? item.label : undefined}
-      className={`${linkClass(location.pathname === item.path)} ${nested && !collapsed ? 'pl-10' : ''}`}
+      className={`${linkClass(location.pathname === item.path || (item.path !== '/' && location.pathname.startsWith(`${item.path}/`)))} ${nested && !collapsed ? 'pl-10' : ''}`}
     >
       <item.icon size={nested ? 16 : 18} className="shrink-0" />
       {!collapsed && <span className="ml-3 truncate">{item.label}</span>}

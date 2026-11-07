@@ -53,6 +53,17 @@ export type RepresentativeLand = Pick<
   | 'customer_name'
   | 'customer_phone'
   | 'reservation_notes'
+  | 'latitude'
+  | 'longitude'
+  | 'parcel_query_url'
+  | 'parcel_query_url_auto'
+  | 'tkgm_mahalle_id'
+  | 'parcel_area'
+  | 'parcel_quality'
+  | 'parcel_locality'
+  | 'parcel_sheet'
+  | 'parcel_geometry'
+  | 'tkgm_synced_at'
 >>;
 
 export interface RepresentativeSettings {
@@ -113,7 +124,14 @@ export type LandUpdate = Partial<Pick<
   | 'reservation_notes'
   | 'deposit_amount'
   | 'sale_price'
->> & { status: LandStatus; installment_plan?: Land['installment_plan'] };
+>> & {
+  status: LandStatus;
+  installment_plan?: Land['installment_plan'];
+  // Yalnızca arsa boşa alınırken gönderilir; müşterisi olan arsada zorunludur.
+  cancel_reason?: CancelReason;
+  cancel_detail?: CancelDetail;
+  cancel_note?: string;
+};
 
 export const getLandStatusUpdate = (status: LandStatus): LandUpdate =>
   status === 'BOS'
@@ -360,5 +378,154 @@ export const updateNotificationSettings = async (
   disabledCodes: string[],
 ): Promise<{ settings: NotificationSettingEntry[] }> => {
   const { data } = await api.put('notifications/settings/', { disabled_codes: disabledCodes });
+  return data;
+};
+
+export type CancelReason =
+  | 'fiyat_odeme'
+  | 'baska_arsa'
+  | 'ozellik'
+  | 'yerinde_gordu'
+  | 'yanlis_yer'
+  | 'ulasilamiyor'
+  | 'diger'
+  | 'devredildi';
+
+export type CancelDetail =
+  | 'odeme_karsilanamadi'
+  | 'kredi_cikmadi'
+  | 'fiyat_anlasilamadi'
+  | 'taksit_anlasilamadi'
+  | 'bizden_aldi'
+  | 'rakipten_aldi'
+  | 'imar'
+  | 'yol_cephe'
+  | 'hisseli'
+  | 'donus_yok'
+  | 'sure_doldu'
+  | 'kisisel';
+
+export type CustomerSource = '' | 'referans' | 'ilan' | 'sosyal_medya' | 'web' | 'ofis' | 'telefon' | 'diger';
+
+export interface Customer {
+  id: number;
+  full_name: string;
+  phone: string;
+  national_id: string;
+  source: CustomerSource;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  purchased_count: number;
+  purchased_total: string | null;
+  active_count: number;
+  cancelled_count: number;
+  last_activity_at: string | null;
+  last_il: string | null;
+  last_ilce: string | null;
+  last_cancel_reason: CancelReason | '' | null;
+  last_cancel_detail: CancelDetail | '' | null;
+}
+
+export interface CustomerLandRecord {
+  id: number;
+  land: number | null;
+  land_label: string;
+  il: string;
+  ilce: string;
+  land_status: LandStatus | null;
+  highest_status: LandStatus;
+  outcome: 'active' | 'sold' | 'cancelled';
+  deposit_amount: string | null;
+  sale_price: string | null;
+  representative_username: string | null;
+  started_at: string;
+  ended_at: string | null;
+  cancel_reason: CancelReason | '';
+  cancel_detail: CancelDetail | '';
+  cancel_note: string;
+}
+
+export interface CustomerDetail extends Customer {
+  records: CustomerLandRecord[];
+}
+
+export type CustomerInput = Pick<Customer, 'full_name' | 'phone' | 'national_id' | 'source' | 'notes'>;
+
+export const getCustomers = async (): Promise<Customer[]> => {
+  const { data } = await api.get('customers/');
+  return data;
+};
+
+export const getCustomer = async (id: number): Promise<CustomerDetail> => {
+  const { data } = await api.get(`customers/${id}/`);
+  return data;
+};
+
+export const createCustomer = async (customer: CustomerInput): Promise<Customer> => {
+  const { data } = await api.post('customers/', customer);
+  return data;
+};
+
+export const updateCustomer = async (id: number, customer: Partial<CustomerInput>): Promise<CustomerDetail> => {
+  const { data } = await api.patch(`customers/${id}/`, customer);
+  return data;
+};
+
+export interface CancelReasonSummary {
+  total: number;
+  results: {
+    reason: CancelReason | '';
+    label: string;
+    count: number;
+    details: { detail: CancelDetail | ''; label: string; count: number }[];
+  }[];
+}
+
+export const getCancelReasons = async (): Promise<CancelReasonSummary> => {
+  const { data } = await api.get('customers/cancel-reasons/');
+  return data;
+};
+
+export interface LandLocationUpdate {
+  latitude: string | null;
+  longitude: string | null;
+  parcel_query_url: string;
+}
+
+export const updateLandLocation = async (id: number, location: LandLocationUpdate): Promise<Land> => {
+  const { data } = await api.patch(`lands/${id}/`, location);
+  return data;
+};
+
+// TKGM'de parsel bulunamazsa 404 ile ilçedeki mahalleler döner; doğrusu seçilip mahalleId ile tekrar denenir.
+export interface TkgmNeighborhoodChoice {
+  id: number;
+  name: string;
+}
+
+export const syncLandFromTkgm = async (id: number, mahalleId?: number): Promise<Land> => {
+  const { data } = await api.post(`lands/${id}/tkgm-sync/`, mahalleId ? { mahalle_id: mahalleId } : {});
+  return data;
+};
+
+// Yeni arsa formundaki il → ilçe → mahalle seçimleri (TKGM listeleri, sunucu üzerinden).
+export interface TkgmUnit {
+  id: number;
+  name: string;
+}
+
+export const getTkgmProvinces = async (): Promise<TkgmUnit[]> => {
+  const { data } = await api.get('tkgm/il/');
+  return data;
+};
+
+export const getTkgmDistricts = async (provinceId: number, provinceName: string): Promise<TkgmUnit[]> => {
+  const { data } = await api.get(`tkgm/il/${provinceId}/ilce/`, { params: { il: provinceName } });
+  return data;
+};
+
+export const getTkgmNeighborhoods = async (districtId: number, districtName: string): Promise<TkgmUnit[]> => {
+  const { data } = await api.get(`tkgm/ilce/${districtId}/mahalle/`, { params: { ilce: districtName } });
   return data;
 };

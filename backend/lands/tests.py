@@ -8,7 +8,7 @@ from rest_framework.test import APIClient, APITestCase
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
 from PIL import Image
-from .models import AuditLog, Land, Notification, NotificationSettings, RepresentativeSettings
+from .models import AuditLog, Customer, CustomerLandRecord, Land, Notification, NotificationSettings, RepresentativeSettings
 from .auth_views import VIEWER_GROUP
 
 
@@ -329,7 +329,10 @@ class LandReservationTests(APITestCase):
             changes={
                 'status': {'old': 'BOS', 'new': 'REZERV'},
                 'customer_name': {'old': '', 'new': 'Gizli Müşteri'},
-                'deleted': {'customer_phone': '05550000000', 'status': 'TAPU'},
+                'cancel_reason': {'old': None, 'new': 'Fiyat / ödeme sorunu'},
+                'cancel_detail': {'old': None, 'new': 'Kredi çıkmadı'},
+                'cancel_note': {'old': None, 'new': 'Banka onay vermedi'},
+                'deleted': {'customer_phone': '05550000000', 'cancel_reason': 'Gizli neden', 'status': 'TAPU'},
             },
         )
         AuditLog.objects.create(
@@ -349,9 +352,23 @@ class LandReservationTests(APITestCase):
             {
                 'status': {'old': 'BOS', 'new': 'REZERV'},
                 'customer_name': {'old': '', 'new': 'Gizli Müşteri'},
-                'deleted': {'customer_phone': '05550000000', 'status': 'TAPU'},
+                'cancel_reason': {'old': None, 'new': 'Fiyat / ödeme sorunu'},
+                'cancel_detail': {'old': None, 'new': 'Kredi çıkmadı'},
+                'cancel_note': {'old': None, 'new': 'Banka onay vermedi'},
+                'deleted': {'customer_phone': '05550000000', 'cancel_reason': 'Gizli neden', 'status': 'TAPU'},
             },
         )
+
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+        representative_response = self.client.get(f'/api/lands/{self.land.pk}/history/')
+        representative_changes = representative_response.data['results'][0]['changes']
+
+        self.assertNotIn('cancel_reason', representative_changes)
+        self.assertNotIn('cancel_detail', representative_changes)
+        self.assertNotIn('cancel_note', representative_changes)
+        self.assertNotIn('cancel_reason', representative_changes['deleted'])
 
         viewer = User.objects.create_user(username='sales', password='Sales-pass-12345')
         viewer.groups.add(Group.objects.create(name=VIEWER_GROUP))
@@ -1251,3 +1268,384 @@ class AuditLogFilterTests(APITestCase):
         self.client.force_authenticate(user=self.viewer)
         self.assertEqual(self.client.get('/api/audit-logs/summary/').status_code, 403)
         self.assertEqual(denied.status_code, 200)
+
+
+class CustomerTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            username='admin',
+            password='admin-pass-123',
+            email='admin@example.com',
+        )
+        self.client.force_authenticate(user=self.admin)
+        self.land = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='Merkez', ada='10', parsel='1')
+        self.other_land = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='Merkez', ada='10', parsel='2')
+
+    def reserve(self, land, name='Ayşe Yılmaz', phone='0532 111 22 33'):
+        return self.client.patch(
+            f'/api/lands/{land.id}/change-status/',
+            {'status': 'REZERV', 'reservation_date': '2026-10-01', 'customer_name': name, 'customer_phone': phone},
+            format='json',
+        )
+
+    def test_reservation_creates_customer_and_open_record(self):
+        response = self.reserve(self.land)
+
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        customer = Customer.objects.get()
+        self.assertEqual(self.land.customer, customer)
+        self.assertEqual(response.data['customer'], customer.id)
+        self.assertEqual(customer.full_name, 'Ayşe Yılmaz')
+        self.assertEqual(customer.phone_key, '905321112233')
+        record = customer.land_records.get()
+        self.assertEqual((record.land, record.outcome, record.highest_status), (self.land, 'active', 'REZERV'))
+        self.assertEqual(record.representative, self.admin)
+
+    def test_same_phone_in_any_format_is_one_customer(self):
+        self.reserve(self.land, phone='0532 111 22 33')
+        self.reserve(self.other_land, name='Ayşe Yılmaz Kaya', phone='+90 532 111 2233')
+
+        customer = Customer.objects.get()
+        self.assertEqual(customer.land_records.count(), 2)
+        self.assertEqual(set(customer.lands.values_list('id', flat=True)), {self.land.id, self.other_land.id})
+
+    def test_releasing_land_keeps_customer_and_marks_record_cancelled(self):
+        self.reserve(self.land)
+        url = f'/api/lands/{self.land.id}/change-status/'
+        missing_reason = self.client.patch(url, {'status': 'BOS'}, format='json')
+        self.assertEqual(missing_reason.status_code, 400)
+        self.assertIn('cancel_reason', missing_reason.data)
+        other_without_note = self.client.patch(url, {'status': 'BOS', 'cancel_reason': 'diger'}, format='json')
+        self.assertEqual(other_without_note.status_code, 400)
+        self.assertIn('cancel_note', other_without_note.data)
+        missing_detail = self.client.patch(url, {'status': 'BOS', 'cancel_reason': 'fiyat_odeme'}, format='json')
+        self.assertEqual(missing_detail.status_code, 400)
+        self.assertIn('cancel_detail', missing_detail.data)
+        wrong_detail = self.client.patch(
+            url, {'status': 'BOS', 'cancel_reason': 'fiyat_odeme', 'cancel_detail': 'rakipten_aldi'}, format='json',
+        )
+        self.assertEqual(wrong_detail.status_code, 400)
+        detail_on_plain_reason = self.client.patch(
+            url, {'status': 'BOS', 'cancel_reason': 'yanlis_yer', 'cancel_detail': 'imar'}, format='json',
+        )
+        self.assertEqual(detail_on_plain_reason.status_code, 400)
+
+        response = self.client.patch(
+            url,
+            {'status': 'BOS', 'cancel_reason': 'fiyat_odeme', 'cancel_detail': 'kredi_cikmadi', 'cancel_note': ' Banka onay vermedi. '},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('cancel_reason', response.data)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'BOS')
+        self.assertIsNone(self.land.customer)
+        customer = Customer.objects.get()
+        record = customer.land_records.get()
+        self.assertEqual(record.outcome, 'cancelled')
+        self.assertEqual(
+            (record.cancel_reason, record.cancel_detail, record.cancel_note),
+            ('fiyat_odeme', 'kredi_cikmadi', 'Banka onay vermedi.'),
+        )
+        self.assertIsNotNone(record.ended_at)
+        audit = AuditLog.objects.filter(action='land.status_changed', target_id=str(self.land.id)).latest('id')
+        self.assertEqual(audit.changes['cancel_reason']['new'], 'Fiyat / ödeme sorunu – Kredi çıkmadı')
+        self.assertEqual(audit.changes['cancel_note']['new'], 'Banka onay vermedi.')
+
+        reasons = self.client.get('/api/customers/cancel-reasons/')
+        self.assertEqual(reasons.data['total'], 1)
+        self.assertEqual(reasons.data['results'], [{
+            'reason': 'fiyat_odeme',
+            'label': 'Fiyat / ödeme sorunu',
+            'count': 1,
+            'details': [{'detail': 'kredi_cikmadi', 'label': 'Kredi çıkmadı', 'count': 1}],
+        }])
+
+        listing = self.client.get('/api/customers/')
+        row = listing.data[0]
+        self.assertEqual((row['cancelled_count'], row['active_count'], row['purchased_count']), (1, 0, 0))
+        self.assertEqual((row['last_cancel_reason'], row['last_cancel_detail']), ('fiyat_odeme', 'kredi_cikmadi'))
+        self.assertEqual((row['last_il'], row['last_ilce']), ('Ankara', 'Gölbaşı'))
+        detail = self.client.get(f"/api/customers/{row['id']}/")
+        self.assertEqual(detail.data['records'][0]['cancel_reason'], 'fiyat_odeme')
+        self.assertEqual(detail.data['records'][0]['cancel_detail'], 'kredi_cikmadi')
+        self.assertEqual(detail.data['records'][0]['cancel_note'], 'Banka onay vermedi.')
+
+    def test_title_deed_marks_purchase_and_totals_it(self):
+        self.reserve(self.land)
+        self.client.patch(
+            f'/api/lands/{self.land.id}/change-status/',
+            {'status': 'KAPORA_ALINDI', 'deposit_amount': '100000.00'},
+            format='json',
+        )
+        image_buffer = BytesIO()
+        Image.new('RGB', (1, 1), color='white').save(image_buffer, format='PNG')
+        image = SimpleUploadedFile('tapu.png', image_buffer.getvalue(), content_type='image/png')
+        with TemporaryDirectory() as media_directory, override_settings(MEDIA_ROOT=media_directory):
+            response = self.client.patch(
+                f'/api/lands/{self.land.id}/change-status/',
+                {'status': 'TAPU', 'sale_price': '1500000.00', 'title_deed_image': image},
+                format='multipart',
+            )
+        self.assertEqual(response.status_code, 200)
+
+        record = CustomerLandRecord.objects.get()
+        self.assertEqual((record.outcome, record.highest_status), ('sold', 'TAPU'))
+        self.assertEqual(str(record.sale_price), '1500000.00')
+        self.assertEqual(str(record.deposit_amount), '100000.00')
+
+        detail = self.client.get(f'/api/customers/{record.customer_id}/')
+        self.assertEqual(detail.data['purchased_count'], 1)
+        self.assertEqual(detail.data['purchased_total'], '1500000.00')
+        self.assertEqual(detail.data['records'][0]['land_status'], 'TAPU')
+
+    def test_representative_reservation_links_customer(self):
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+
+        response = self.client.post(
+            f'/api/representative/lands/{self.land.id}/reserve/',
+            {'reservation_date': '2026-10-01', 'customer_name': 'Mehmet Demir', 'customer_phone': '5321234567'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        record = CustomerLandRecord.objects.get()
+        self.assertEqual((record.customer.full_name, record.customer.phone_key), ('Mehmet Demir', '905321234567'))
+        self.assertEqual(record.representative, representative)
+        self.assertEqual(self.client.get('/api/customers/').status_code, 403)
+
+    def test_sales_support_can_manage_but_nobody_can_delete(self):
+        support = User.objects.create_user(username='support', password='Support-pass-12345')
+        support.groups.add(Group.objects.create(name='Satış Destek'))
+        self.reserve(self.land)
+        self.client.patch(
+            f'/api/lands/{self.land.id}/change-status/',
+            {'status': 'BOS', 'cancel_reason': 'fiyat_odeme', 'cancel_detail': 'kredi_cikmadi'},
+            format='json',
+        )
+        customer = Customer.objects.get()
+
+        self.client.force_authenticate(user=support)
+        listing = self.client.get('/api/customers/')
+        self.assertEqual(listing.status_code, 200)
+        self.assertNotIn('last_cancel_reason', listing.data[0])
+        self.assertNotIn('last_cancel_detail', listing.data[0])
+        detail = self.client.get(f'/api/customers/{customer.id}/')
+        self.assertNotIn('cancel_reason', detail.data['records'][0])
+        self.assertNotIn('cancel_detail', detail.data['records'][0])
+        self.assertNotIn('cancel_note', detail.data['records'][0])
+        self.assertEqual(self.client.get('/api/customers/cancel-reasons/').status_code, 403)
+        self.assertEqual(self.client.delete(f'/api/customers/{customer.id}/').status_code, 405)
+
+    def test_editing_customer_updates_linked_lands_and_validates(self):
+        self.reserve(self.land)
+        customer = Customer.objects.get()
+        Customer.objects.create(full_name='Başka Kişi', phone='0533 999 88 77', phone_key='905339998877')
+
+        response = self.client.patch(
+            f'/api/customers/{customer.id}/',
+            {'full_name': 'Ayşe Yılmaz Kaya', 'national_id': '12345678901', 'source': 'referans'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.customer_name, 'Ayşe Yılmaz Kaya')
+        self.assertTrue(AuditLog.objects.filter(action='customer.updated', target_id=str(customer.id)).exists())
+
+        invalid_id = self.client.patch(f'/api/customers/{customer.id}/', {'national_id': '123'}, format='json')
+        self.assertEqual(invalid_id.status_code, 400)
+        duplicate_phone = self.client.patch(f'/api/customers/{customer.id}/', {'phone': '05339998877'}, format='json')
+        self.assertEqual(duplicate_phone.status_code, 400)
+
+    def test_changing_buyer_on_land_moves_record_to_new_customer(self):
+        self.reserve(self.land)
+        self.reserve(self.land, name='Can Öztürk', phone='0544 555 66 77')
+
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.customer.full_name, 'Can Öztürk')
+        outcomes = dict(CustomerLandRecord.objects.values_list('customer__full_name', 'outcome'))
+        self.assertEqual(outcomes, {'Ayşe Yılmaz': 'cancelled', 'Can Öztürk': 'active'})
+        self.assertEqual(CustomerLandRecord.objects.get(outcome='cancelled').cancel_reason, 'devredildi')
+
+    def test_cancel_reason_is_ignored_when_not_releasing(self):
+        response = self.client.patch(
+            f'/api/lands/{self.land.id}/change-status/',
+            {'status': 'REZERV', 'customer_name': 'Ayşe Yılmaz', 'customer_phone': '05321112233', 'cancel_reason': 'fiyat_odeme'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CustomerLandRecord.objects.get().cancel_reason, '')
+
+
+class LandLocationTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='admin@example.com')
+        self.client.force_authenticate(user=self.admin)
+        self.land = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='Merkez', ada='10', parsel='1')
+        self.url = f'/api/lands/{self.land.id}/'
+
+    def test_saves_coordinates_and_parcel_query_link(self):
+        response = self.client.patch(self.url, {
+            'latitude': '39.791234',
+            'longitude': '32.805678',
+            'parcel_query_url': 'https://parselsorgu.tkgm.gov.tr/#ara/idari/123/10/1/1700000000000',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertEqual((str(self.land.latitude), str(self.land.longitude)), ('39.791234', '32.805678'))
+        self.assertTrue(AuditLog.objects.filter(action='land.updated', changes__has_key='latitude').exists())
+
+        cleared = self.client.patch(self.url, {'latitude': None, 'longitude': None, 'parcel_query_url': ''}, format='json')
+        self.assertEqual(cleared.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertIsNone(self.land.latitude)
+
+    def test_rejects_invalid_locations(self):
+        only_latitude = self.client.patch(self.url, {'latitude': '39.79'}, format='json')
+        self.assertEqual(only_latitude.status_code, 400)
+        swapped = self.client.patch(self.url, {'latitude': '32.80', 'longitude': '39.79'}, format='json')
+        self.assertEqual(swapped.status_code, 400)
+        other_site = self.client.patch(self.url, {'parcel_query_url': 'https://example.com/parsel'}, format='json')
+        self.assertEqual(other_site.status_code, 400)
+        self.assertIn('parcel_query_url', other_site.data)
+
+    def test_representatives_see_location_but_cannot_change_it(self):
+        self.land.latitude, self.land.longitude = '39.791234', '32.805678'
+        self.land.save()
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+
+        lands = self.client.get('/api/representative/lands/').data
+        self.assertEqual((lands[0]['latitude'], lands[0]['longitude']), ('39.791234', '32.805678'))
+        self.assertIn('parcel_query_url', lands[0])
+        self.assertEqual(self.client.patch(self.url, {'latitude': '40.0', 'longitude': '33.0'}, format='json').status_code, 403)
+
+
+class ParcelLinkTests(APITestCase):
+    LINK = 'https://parselsorgu.tkgm.gov.tr/#ara/idari/154321/10/1/1700000000000'
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='admin@example.com')
+        self.client.force_authenticate(user=self.admin)
+        self.first = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='Merkez', ada='10', parsel='1')
+        self.neighbor = Land.objects.create(il='ANKARA', ilce='Gölbaşı', mahalle='merkez', ada='12', parsel='7')
+        self.elsewhere = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='İncek', ada='12', parsel='7')
+
+    def auto_links(self):
+        return {row['id']: row['parcel_query_url_auto'] for row in self.client.get('/api/lands/').data}
+
+    def test_one_saved_link_creates_links_for_the_same_neighborhood(self):
+        self.assertEqual(self.auto_links()[self.neighbor.id], '')
+
+        response = self.client.patch(f'/api/lands/{self.first.id}/', {'parcel_query_url': self.LINK}, format='json')
+        self.assertEqual(response.status_code, 200)
+
+        links = self.auto_links()
+        self.assertEqual(links[self.neighbor.id], 'https://parselsorgu.tkgm.gov.tr/#ara/idari/154321/12/7/1700000000000')
+        self.assertEqual(links[self.elsewhere.id], '')
+        # Kendi linki olan arsaya otomatik link verilmez.
+        self.assertEqual(links[self.first.id], '')
+
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+        rep_links = {row['id']: row['parcel_query_url_auto'] for row in self.client.get('/api/representative/lands/').data}
+        self.assertEqual(rep_links[self.neighbor.id], links[self.neighbor.id])
+
+    def test_link_for_another_parcel_is_not_learned(self):
+        wrong = 'https://parselsorgu.tkgm.gov.tr/#ara/idari/154321/99/5/1700000000000'
+        self.client.patch(f'/api/lands/{self.first.id}/', {'parcel_query_url': wrong}, format='json')
+        self.assertEqual(self.auto_links()[self.neighbor.id], '')
+
+
+class TkgmSyncTests(APITestCase):
+    PARCEL = {
+        'type': 'Feature',
+        'geometry': {'type': 'Polygon', 'coordinates': [[[32.80, 39.79], [32.81, 39.79], [32.81, 39.80], [32.80, 39.80], [32.80, 39.79]]]},
+        'properties': {
+            'mahalleId': 55902, 'adaNo': '10', 'parselNo': '1', 'alan': '6.054,18',
+            'ilAd': 'Ankara', 'ilceAd': 'Gölbaşı', 'mahalleAd': 'Merkez',
+            'nitelik': 'Tarla', 'mevkii': 'Selaf', 'pafta': 'F49-C-1',
+        },
+    }
+
+    def setUp(self):
+        from . import tkgm
+        for cached in (tkgm.provinces, tkgm.districts, tkgm.neighborhoods):
+            cached.cache_clear()
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='admin@example.com')
+        self.client.force_authenticate(user=self.admin)
+        self.land = Land.objects.create(il='Ankara', ilce='Gölbaşı', mahalle='Merkez Mah.', ada='10', parsel='1')
+        self.requests = []
+
+    def fake_fetch(self, path):
+        self.requests.append(path)
+        feature = lambda text, item_id: {'properties': {'text': text, 'id': item_id}}
+        if path == 'idariYapi/ilListe':
+            return {'features': [feature('Adana', 23), feature('Ankara', 28)]}
+        if path == 'idariYapi/ilceListe/28':
+            return {'features': [feature('Altindağ', 160), feature('Gölbaşi', 170)]}
+        if path == 'idariYapi/mahalleListe/170':
+            return {'features': [feature('Merkez-Imar', 55901), feature('Merkez', 55902), feature('İncek', 55903)]}
+        if path == 'parsel/55902/10/1':
+            return self.PARCEL
+        return None
+
+    def sync(self, data=None):
+        from unittest import mock
+        with mock.patch('lands.tkgm.fetch_json', side_effect=self.fake_fetch):
+            return self.client.post(f'/api/lands/{self.land.id}/tkgm-sync/', data or {}, format='json')
+
+    def test_finds_parcel_and_fills_details_link_and_coordinates(self):
+        response = self.sync()
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['tkgm_mahalle_id'], 55902)
+        self.assertEqual(response.data['parcel_area'], '6054.18')
+        self.assertEqual((response.data['parcel_quality'], response.data['parcel_locality']), ('Tarla', 'Selaf'))
+        self.assertEqual(response.data['parcel_query_url_auto'], 'https://parselsorgu.tkgm.gov.tr/#ara/idari/55902/10/1/')
+        self.assertEqual((response.data['latitude'], response.data['longitude']), ('39.795000', '32.805000'))
+        self.assertEqual(len(response.data['parcel_geometry']), 5)
+        # Önce kadastro ("Merkez"), sonra imar kaydı denenir; "Merkez Mah." / "Gölbaşi" farkları eşleşir.
+        self.assertIn('parsel/55902/10/1', self.requests)
+        self.assertTrue(AuditLog.objects.filter(action='land.tkgm_synced', target_id=str(self.land.id)).exists())
+
+    def test_fixes_spelling_from_official_parcel_names_only(self):
+        self.land.ilce = 'Gölbaşi'
+        self.land.save()
+        response = self.sync()
+        self.assertEqual(response.status_code, 200)
+        # "Gölbaşi" yalnızca yazım farkı olduğu için düzeltilir; "Merkez Mah." da resmi "Merkez" olur.
+        self.assertEqual((response.data['ilce'], response.data['mahalle']), ('Gölbaşı', 'Merkez'))
+
+    def test_missing_parcel_returns_neighborhood_choices_and_manual_choice_works(self):
+        self.land.parsel = '2'
+        self.land.save()
+        response = self.sync()
+        self.assertEqual(response.status_code, 404)
+        self.assertIn({'id': 55903, 'name': 'İncek'}, response.data['candidates'])
+
+        self.land.parsel = '1'
+        self.land.save()
+        chosen = self.sync({'mahalle_id': 55902})
+        self.assertEqual(chosen.status_code, 200)
+        self.assertEqual(chosen.data['tkgm_mahalle_id'], 55902)
+
+    def test_changing_parcel_number_clears_tkgm_details(self):
+        self.sync()
+        response = self.client.patch(f'/api/lands/{self.land.id}/', {'parsel': '99'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data['tkgm_mahalle_id'])
+        self.assertIsNone(response.data['parcel_area'])
+
+    def test_representatives_cannot_trigger_sync(self):
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+        self.assertEqual(self.sync().status_code, 403)

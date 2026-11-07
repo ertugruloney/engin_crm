@@ -131,6 +131,11 @@ const describeLand = (event: CalendarEvent) => {
 const FIELD_LABELS: Record<string, string> = {
   customer_name: 'Müşteri',
   customer_phone: 'Telefon',
+  cancel_reason: 'İptal nedeni',
+  cancel_note: 'İptal açıklaması',
+  latitude: 'Enlem',
+  longitude: 'Boylam',
+  parcel_query_url: 'Parsel Sorgu linki',
   reservation_notes: 'Not',
   reservation_date: 'Rezervasyon tarihi',
   deposit_amount: 'Kapora tutarı',
@@ -144,7 +149,8 @@ const FIELD_LABELS: Record<string, string> = {
   ada: 'Ada',
   parsel: 'Parsel',
 };
-const HIDDEN_FIELDS = new Set(['land_label', 'status', 'demo', 'created', 'deleted', 'lands', 'count']);
+// İptal nedeni ayrıca, kartın içinde öne çıkarılarak gösterilir.
+const HIDDEN_FIELDS = new Set(['land_label', 'status', 'demo', 'created', 'deleted', 'lands', 'count', 'cancel_reason', 'cancel_note']);
 
 const formatCurrency = (value: unknown) =>
   new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', maximumFractionDigits: 0 }).format(Number(value));
@@ -518,6 +524,8 @@ export default function ActivityCalendarPage() {
                   const land = describeLand(event);
                   const details = fieldChanges(event);
                   const customer = event.changes.customer_name as { new?: string } | undefined;
+                  const cancelReason = event.changes.cancel_reason as { new?: string } | undefined;
+                  const cancelNote = event.changes.cancel_note as { new?: string } | undefined;
                   const canOpen = event.target_type === 'land' && /^\d+$/.test(event.target_id) && event.action !== 'land.deleted';
                   const isOpen = expanded.has(event.id);
                   return (
@@ -546,6 +554,12 @@ export default function ActivityCalendarPage() {
                           <p className="mt-2 text-xs text-slate-500">
                             Müşteri: <span className="font-medium text-slate-700">{customer.new}</span>
                           </p>
+                        )}
+                        {cancelReason?.new && (
+                          <div className="mt-2 rounded-md bg-rose-50 px-2.5 py-1.5 text-xs text-rose-800">
+                            <span className="font-semibold">İptal nedeni:</span> {cancelReason.new}
+                            {cancelNote?.new && <span className="block text-rose-700">“{cancelNote.new}”</span>}
+                          </div>
                         )}
 
                         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">

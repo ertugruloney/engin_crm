@@ -15,8 +15,13 @@ import AuditLogPage from './components/AuditLogPage';
 import ActivityCalendarPage from './components/ActivityCalendarPage';
 import DashboardPage from './components/DashboardPage';
 import ReportsPage from './components/ReportsPage';
+import CustomersPage from './components/CustomersPage';
+import CustomerDetailPage from './components/CustomerDetailPage';
 import LandDetailsPage from './components/LandDetailsPage';
 import LandHistoryPage from './components/LandHistoryPage';
+
+// Bu sayfalar 1600px sınırı olmadan tüm genişliği kullanır.
+const FULL_WIDTH_PATHS = ['/', '/board'];
 
 function App() {
   const location = useLocation();
@@ -41,11 +46,12 @@ function App() {
     return <Navigate to="/login" replace />;
   }
   const userHomePath = user.role === 'admin' ? '/' : user.role === 'sales_support' ? '/board' : '/available-lands';
-  const isLandDetailsPath = /^\/land\/\d+(\/history)?$/.test(location.pathname);
+  // Satış destek arsa detaylarını ve müşteri kartlarını da açabilir.
+  const isSupportDetailPath = /^\/(land\/\d+(\/history)?|customers\/\d+)$/.test(location.pathname);
   const allowedPaths = user.role === 'sales_support'
-    ? ['/board', '/import']
+    ? ['/board', '/import', '/customers']
     : [userHomePath];
-  if (user.role !== 'admin' && !(user.role === 'sales_support' && isLandDetailsPath) && !allowedPaths.includes(location.pathname)) {
+  if (user.role !== 'admin' && !(user.role === 'sales_support' && isSupportDetailPath) && !allowedPaths.includes(location.pathname)) {
     return <Navigate to={userHomePath} replace />;
   }
   if (user.role === 'admin' && location.pathname === '/available-lands') {
@@ -62,7 +68,7 @@ function App() {
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
         <Topbar user={user} onMenuClick={() => setMobileMenuOpen(true)} />
         <main className="relative min-h-0 flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
-          <div className={`mx-auto flex min-h-full w-full flex-col ${location.pathname === '/' ? '' : 'max-w-[1600px]'}`}>
+          <div className={`mx-auto flex min-h-full w-full flex-col ${FULL_WIDTH_PATHS.includes(location.pathname) ? '' : 'max-w-[1600px]'}`}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/board" element={<KanbanBoard isSalesSupport={user.role === 'sales_support'} />} />
@@ -77,6 +83,8 @@ function App() {
               <Route path="/reports/region" element={<ReportsPage tab="region" />} />
               <Route path="/reports/person" element={<ReportsPage tab="personnel" />} />
               <Route path="/activity-calendar" element={<ActivityCalendarPage />} />
+              <Route path="/customers" element={<CustomersPage isAdmin={user.role === 'admin'} />} />
+              <Route path="/customers/:customerId" element={<CustomerDetailPage isAdmin={user.role === 'admin'} />} />
               <Route path="*" element={<Navigate to={userHomePath} replace />} />
             </Routes>
           </div>

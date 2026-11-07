@@ -1,6 +1,8 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import LandViewSet
+from .customer_views import CustomerViewSet
+from .tkgm_views import tkgm_districts, tkgm_neighborhoods, tkgm_provinces
 from .auth_views import (
     audit_log_summary,
     audit_logs,
@@ -23,6 +25,7 @@ from .notification_views import (
 
 router = DefaultRouter()
 router.register(r'lands', LandViewSet)
+router.register(r'customers', CustomerViewSet, basename='customer')
 
 urlpatterns = [
     path('users/', users_view),
@@ -30,6 +33,9 @@ urlpatterns = [
     path('audit-logs/summary/', audit_log_summary),
     path('audit-logs/calendar/', audit_logs_calendar),
     path('dashboard/sales-leaderboard/', sales_leaderboard),
+    path('tkgm/il/', tkgm_provinces),
+    path('tkgm/il/<int:province_id>/ilce/', tkgm_districts),
+    path('tkgm/ilce/<int:district_id>/mahalle/', tkgm_neighborhoods),
     path('lands/<int:land_id>/history/', land_history),
     path('notifications/', notifications_list),
     path('notifications/counts/', notification_counts),

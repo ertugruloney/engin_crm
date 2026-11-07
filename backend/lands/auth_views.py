@@ -23,6 +23,7 @@ from rest_framework import status
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from .audit import record_admin_action, record_user_action
+from .customers import sync_land_customer
 from .models import AuditLog, Land
 from .models import RepresentativeSettings
 from .notifications import notify
@@ -279,18 +280,23 @@ def land_history(request, land_id):
             'reservation_notes',
             'deposit_amount',
         }
+    else:
+        private_fields = set()
+    if not request.user.is_staff:
+        private_fields.update({'cancel_reason', 'cancel_detail', 'cancel_note'})
 
-        def redact_private_fields(value):
-            if isinstance(value, dict):
-                return {
-                    field: redact_private_fields(item)
-                    for field, item in value.items()
-                    if field not in private_fields
-                }
-            if isinstance(value, list):
-                return [redact_private_fields(item) for item in value]
-            return value
+    def redact_private_fields(value):
+        if isinstance(value, dict):
+            return {
+                field: redact_private_fields(item)
+                for field, item in value.items()
+                if field not in private_fields
+            }
+        if isinstance(value, list):
+            return [redact_private_fields(item) for item in value]
+        return value
 
+    if private_fields:
         for result in results:
             result['changes'] = redact_private_fields(result['changes'])
 
@@ -498,6 +504,7 @@ def reserve_land(request, land_id):
         serializer.is_valid(raise_exception=True)
         land = serializer.save(status='REZERV')
         land.status_history.create(status='REZERV')
+        sync_land_customer(land, actor=request.user)
         land_label = f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
         record_user_action(
             request,

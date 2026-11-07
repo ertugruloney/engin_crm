@@ -6,7 +6,11 @@ from rest_framework.response import Response
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 from django.db import transaction
 from .audit import model_snapshot, record_admin_action, record_user_action
-from .models import Land, LandStatusHistory
+from .customers import sync_land_customer
+from .parcel_links import learn_from_land
+from . import tkgm
+from .tkgm_sync import LOCATION_IDENTITY_FIELDS, ParcelNotFound, clear_tkgm_fields, sync_land_from_tkgm
+from .models import Land, LandStatusHistory, cancel_reason_text
 from .serializers import LandSerializer, LandStatusSerializer
 from .auth_views import is_sales_representative, is_sales_support, representative_reservation_details_visible
 
@@ -57,6 +61,8 @@ class LandViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         land = serializer.save()
         land.status_history.create(status=land.status)
+        sync_land_customer(land, actor=self.request.user)
+        learn_from_land(land)
         self.record_land_action(
             self.request,
             'land.created',
@@ -69,6 +75,10 @@ class LandViewSet(viewsets.ModelViewSet):
         )
 
     def perform_update(self, serializer):
+        # İptal nedeni modelde değil müşteri-arsa kaydında tutulur; kaydetmeden önce ayıklanır.
+        cancel_reason = serializer.validated_data.pop('cancel_reason', '')
+        cancel_detail = serializer.validated_data.pop('cancel_detail', '')
+        cancel_note = serializer.validated_data.pop('cancel_note', '').strip()
         previous = model_snapshot(serializer.instance)
         previous_status = serializer.instance.status
         land = serializer.save()
@@ -79,6 +89,10 @@ class LandViewSet(viewsets.ModelViewSet):
             if previous.get(field) != current.get(field)
         }
         if changes:
+            if land.status == 'BOS' and cancel_reason:
+                changes['cancel_reason'] = {'old': None, 'new': cancel_reason_text(cancel_reason, cancel_detail)}
+                if cancel_note:
+                    changes['cancel_note'] = {'old': None, 'new': cancel_note}
             changes['land_label'] = (
                 f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
             )
@@ -89,6 +103,16 @@ class LandViewSet(viewsets.ModelViewSet):
                 land.pk,
                 changes,
             )
+        learn_from_land(land)
+        if land.tkgm_synced_at and any(field in changes for field in LOCATION_IDENTITY_FIELDS):
+            clear_tkgm_fields(land)
+        sync_land_customer(
+            land,
+            actor=self.request.user,
+            cancel_reason=cancel_reason,
+            cancel_detail=cancel_detail,
+            cancel_note=cancel_note,
+        )
         if land.status == previous_status:
             return
         if land.status == 'BOS':
@@ -100,6 +124,37 @@ class LandViewSet(viewsets.ModelViewSet):
             record_user_action(request, action, target_type, target_id, changes)
         else:
             record_admin_action(request, action, target_type, target_id, changes)
+
+    @action(detail=True, methods=['post'], url_path='tkgm-sync')
+    def tkgm_sync(self, request, pk=None):
+        """Arsayı TKGM Parsel Sorgu'da bulur; mahalle numarası, parsel bilgileri, sınır ve koordinatı kaydeder."""
+        land = self.get_object()
+        mahalle_id = request.data.get('mahalle_id')
+        if mahalle_id not in (None, '') and not str(mahalle_id).isdigit():
+            return Response({'detail': 'Geçersiz mahalle numarası.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            sync_land_from_tkgm(land, mahalle_id=int(mahalle_id) if mahalle_id not in (None, '') else None)
+        except ParcelNotFound as error:
+            return Response(
+                {'detail': str(error), 'candidates': [{'id': item['id'], 'name': item['text']} for item in error.candidates]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except tkgm.TkgmError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+        self.record_land_action(
+            request,
+            'land.tkgm_synced',
+            'land',
+            land.pk,
+            {
+                'land_label': f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}',
+                'tkgm_mahalle_id': land.tkgm_mahalle_id,
+                'parcel_area': str(land.parcel_area) if land.parcel_area is not None else None,
+                'parcel_quality': land.parcel_quality,
+            },
+        )
+        land.refresh_from_db()
+        return Response(self.get_serializer(land).data)
 
     @action(detail=True, methods=['patch'], url_path='change-status')
     def change_status(self, request, pk=None):
@@ -133,6 +188,8 @@ class LandViewSet(viewsets.ModelViewSet):
                         'duplicate_rows': duplicate_rows,
                     }, status=status.HTTP_400_BAD_REQUEST)
                 lands = serializer.save()
+                for land in lands:
+                    learn_from_land(land)
                 LandStatusHistory.objects.bulk_create([
                     LandStatusHistory(land=land, status=land.status)
                     for land in lands

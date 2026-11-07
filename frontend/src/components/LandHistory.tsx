@@ -10,6 +10,11 @@ const FIELD_LABELS: Record<string, string> = {
   status: 'Durum',
   customer_name: 'Müşteri adı',
   customer_phone: 'Telefon',
+  cancel_reason: 'İptal nedeni',
+  cancel_note: 'İptal açıklaması',
+  latitude: 'Enlem',
+  longitude: 'Boylam',
+  parcel_query_url: 'Parsel Sorgu linki',
   reservation_notes: 'Arsa notu',
   deposit_amount: 'Kapora tutarı',
 };

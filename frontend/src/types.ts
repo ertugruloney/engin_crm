@@ -22,12 +22,28 @@ export interface Land {
   is_reserved: boolean;
   reservation_notes: string;
   reservation_date: string | null;
+  // Bağlı müşteri kartı (yalnızca yönetici ve satış destek görür).
+  customer?: number | null;
   customer_name: string;
   customer_phone: string;
   deposit_amount: string | null;
   sale_price: string | null;
   installment_plan: LandInstallment[];
   title_deed_image: string | null;
+  // Konum (isteğe bağlı): ondalık derece ve Tapu Kadastro Parsel Sorgu linki.
+  latitude?: string | null;
+  longitude?: string | null;
+  parcel_query_url?: string;
+  // Kendi linki yoksa aynı mahalleden öğrenilen kalıpla üretilmiş link (salt okunur).
+  parcel_query_url_auto?: string;
+  // TKGM Parsel Sorgu'dan alınan bilgiler ("TKGM'den bilgileri getir").
+  tkgm_mahalle_id?: number | null;
+  parcel_area?: string | null;
+  parcel_quality?: string;
+  parcel_locality?: string;
+  parcel_sheet?: string;
+  parcel_geometry?: [number, number][] | null;
+  tkgm_synced_at?: string | null;
   status_history: LandStatusHistory[];
 }
 

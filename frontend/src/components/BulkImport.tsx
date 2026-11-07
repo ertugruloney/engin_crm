@@ -82,6 +82,21 @@ const getCell = (row: Record<string, unknown>, ...columnNames: string[]) => {
   return '';
 };
 
+// İsteğe bağlı konum sütunları: Enlem, Boylam (virgüllü ondalık da olur) ve Parsel Sorgu Linki.
+const parseLocationCells = (row: Record<string, unknown>) => {
+  const toCoordinate = (value: unknown) => {
+    const number = Number(String(value ?? '').trim().replace(',', '.'));
+    return String(value ?? '').trim() && Number.isFinite(number) ? number.toFixed(6) : null;
+  };
+  const latitude = toCoordinate(getCell(row, 'Enlem', 'Latitude'));
+  const longitude = toCoordinate(getCell(row, 'Boylam', 'Longitude'));
+  return {
+    latitude: latitude && longitude ? latitude : null,
+    longitude: latitude && longitude ? longitude : null,
+    parcel_query_url: String(getCell(row, 'Parsel Sorgu Linki', 'Parsel Sorgu', 'Parcel Query URL') ?? '').trim(),
+  };
+};
+
 export default function BulkImport({
   returnPath = '/board',
   isSalesSupport = false,
@@ -156,6 +171,7 @@ export default function BulkImport({
             status: status ?? 'BOS',
             is_reserved: false,
             reservation_notes: String(getCell(row, 'Not', 'Notes')),
+            ...parseLocationCells(row),
             reservation_date: null,
             customer_name: '',
             customer_phone: '',
@@ -267,7 +283,7 @@ export default function BulkImport({
           <AlertCircle size={20} className="text-amber-500 mr-3 shrink-0 mt-0.5" />
           <div>
             <strong>Excel sütunları:</strong> İl, İlçe, Mahalle, Ada No, Parsel No ve Durum.
-            Başlıklar büyük/küçük harfe duyarsızdır. Durum değerleri: Satışa Uygun, Rezerv, Kapora Alındı veya Tapu. Tapu durumu için Satış Bedeli sütunu zorunludur. Not sütunu isteğe bağlıdır.
+            Başlıklar büyük/küçük harfe duyarsızdır. Durum değerleri: Satışa Uygun, Rezerv, Kapora Alındı veya Tapu. Tapu durumu için Satış Bedeli sütunu zorunludur. Not, Enlem, Boylam ve Parsel Sorgu Linki sütunları isteğe bağlıdır.
           </div>
         </div>
       </div>

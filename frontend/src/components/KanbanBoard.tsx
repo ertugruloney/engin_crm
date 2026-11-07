@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Download, Filter, Plus, RotateCcw, Search } from 'lucide-react';
+import { Download, Filter, Plus, RotateCcw } from 'lucide-react';
 import * as xlsx from 'xlsx';
 import { getLands } from '../api';
 import { statusColors, statusLabels } from '../types';
@@ -33,7 +33,6 @@ const uniqueSorted = (values: string[]) =>
 export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport?: boolean }) {
   const [showCreateLand, setShowCreateLand] = useState(false);
   const [filters, setFilters] = useState<LandFilters>(EMPTY_FILTERS);
-  const [landSearch, setLandSearch] = useState('');
   const [filterVisibility] = useState(loadFilterVisibility);
   const navigate = useNavigate();
   const location = useLocation();
@@ -62,14 +61,13 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
     (!filterVisibility.il || !filters.il || land.il === filters.il)
     && (!filterVisibility.ilce || !filters.ilce || land.ilce === filters.ilce)
     && (!filterVisibility.mahalle || !filters.mahalle || land.mahalle === filters.mahalle)
-    && (!filterVisibility.ada || !filters.ada || land.ada.toLocaleLowerCase('tr-TR').includes(filters.ada.trim().toLocaleLowerCase('tr-TR')))
-    && (!filterVisibility.parsel || !filters.parsel || land.parsel.toLocaleLowerCase('tr-TR').includes(filters.parsel.trim().toLocaleLowerCase('tr-TR')))
+    && (!(isSalesSupport || filterVisibility.ada) || !filters.ada || land.ada.toLocaleLowerCase('tr-TR').includes(filters.ada.trim().toLocaleLowerCase('tr-TR')))
+    && (!(isSalesSupport || filterVisibility.parsel) || !filters.parsel || land.parsel.toLocaleLowerCase('tr-TR').includes(filters.parsel.trim().toLocaleLowerCase('tr-TR')))
     && (!filters.status || land.status === filters.status)
-    && (!isSalesSupport || !landSearch || `${land.ada}/${land.parsel}`.toLocaleLowerCase('tr-TR').includes(landSearch.trim().toLocaleLowerCase('tr-TR')))
-  ), [lands, filters, filterVisibility, isSalesSupport, landSearch]);
+  ), [lands, filters, filterVisibility, isSalesSupport]);
 
   const hasActiveFilters = FILTER_FIELDS
-    .some(field => filterVisibility[field] && Boolean(filters[field]))
+    .some(field => (filterVisibility[field] || (isSalesSupport && (field === 'ada' || field === 'parsel'))) && Boolean(filters[field]))
     || Boolean(filters.status);
   const supportStatusCards: { label: string; status: LandStatus | ''; dot: string; value: number }[] = [
     { label: 'Tüm arsalar', status: '', dot: 'bg-blue-600', value: lands.length },
@@ -102,7 +100,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
   if (isError) return <div role="alert" className="text-red-600">Arsalar yüklenemedi: {error.message}</div>;
 
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full max-w-7xl flex-col">
+    <div className="flex h-full min-h-0 w-full flex-col">
       <div className={`mb-4 flex shrink-0 flex-wrap items-center justify-between gap-4 ${
         isSalesSupport ? '' : 'rounded-2xl border border-transparent p-5'
       }`}>
@@ -165,7 +163,6 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                 type="button"
                 onClick={() => {
                   setFilters(EMPTY_FILTERS);
-                  setLandSearch('');
                 }}
                 className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700"
               >
@@ -175,22 +172,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
             )}
           </div>
         </div>
-        <div className="grid gap-2 sm:gap-3" style={{ gridTemplateColumns: isSalesSupport ? 'minmax(190px, 1.4fr) repeat(auto-fit, minmax(min(100%, 150px), 1fr))' : 'repeat(auto-fit, minmax(min(100%, 170px), 1fr))' }}>
-          {isSalesSupport && (
-            <label className="text-xs font-medium text-slate-600">
-              Ada / Parsel ara
-              <span className="relative mt-1 block">
-                <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="search"
-                  value={landSearch}
-                  onChange={event => setLandSearch(event.target.value)}
-                  placeholder="Örn. 255/12"
-                  className="block w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400"
-                />
-              </span>
-            </label>
-          )}
+        <div className="grid gap-2 sm:gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 150px), 1fr))' }}>
           {filterVisibility.il && (
             <label className="text-xs font-medium text-slate-600">
               İl
@@ -230,7 +212,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               </select>
             </label>
           )}
-          {!isSalesSupport && filterVisibility.ada && (
+          {(isSalesSupport || filterVisibility.ada) && (
             <label className="text-xs font-medium text-slate-600">
               Ada
               <input
@@ -242,7 +224,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               />
             </label>
           )}
-          {!isSalesSupport && filterVisibility.parsel && (
+          {(isSalesSupport || filterVisibility.parsel) && (
             <label className="text-xs font-medium text-slate-600">
               Parsel
               <input
@@ -277,7 +259,6 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               type="button"
               onClick={() => {
                 setFilters(EMPTY_FILTERS);
-                setLandSearch('');
               }}
               className="self-end rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
             >

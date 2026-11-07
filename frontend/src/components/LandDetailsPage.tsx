@@ -37,7 +37,7 @@ export default function LandDetailsPage({ isSalesSupport }: LandDetailsPageProps
   }
 
   return (
-    <div className="mx-auto flex min-h-full w-full max-w-4xl flex-1 flex-col gap-4 px-3 sm:px-5">
+    <div className="mx-auto flex min-h-full w-full flex-1 flex-col gap-4">
       <img
         src={headerImage}
         alt="Arsa ve gayrimenkul planı"

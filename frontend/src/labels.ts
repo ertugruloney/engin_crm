@@ -6,6 +6,9 @@ export const ACTION_LABELS: Record<string, string> = {
   'land.status_changed': 'Arsa durumu değiştirildi',
   'land.deleted': 'Arsa silindi',
   'land.bulk_created': 'Toplu arsa ekleme',
+  'land.tkgm_synced': 'TKGM bilgileri alındı',
+  'customer.created': 'Müşteri oluşturuldu',
+  'customer.updated': 'Müşteri bilgileri güncellendi',
   'user.created': 'Kullanıcı oluşturuldu',
   'notification_settings.updated': 'Bildirim ayarları güncellendi',
   'settings.updated': 'Temsilci ayarı güncellendi',
@@ -13,6 +16,7 @@ export const ACTION_LABELS: Record<string, string> = {
 
 export const TARGET_LABELS: Record<string, string> = {
   land: 'Arsa',
+  customer: 'Müşteri',
   session: 'Oturum',
   sales_representative: 'Satış temsilcisi',
   sales_support: 'Satış destek',
