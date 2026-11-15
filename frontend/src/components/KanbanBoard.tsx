@@ -4,9 +4,10 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Download, Filter, Plus, RotateCcw } from 'lucide-react';
 import * as xlsx from 'xlsx';
 import { getLands } from '../api';
-import { statusColors, statusLabels } from '../types';
-import type { Land, LandStatus } from '../types';
+import { ownershipLabels, statusColors, statusLabels, parcelLabel } from '../types';
+import type { Land, LandStatus, OwnershipType } from '../types';
 import CreateLandModal from './CreateLandModal';
+import CenterDistancesInline from './CenterDistancesInline';
 import { FILTER_FIELDS, loadFilterVisibility } from '../filterSettings';
 
 interface LandFilters {
@@ -16,6 +17,7 @@ interface LandFilters {
   ada: string;
   parsel: string;
   status: LandStatus | '';
+  ownership: OwnershipType | '';
 }
 
 const EMPTY_FILTERS: LandFilters = {
@@ -25,6 +27,7 @@ const EMPTY_FILTERS: LandFilters = {
   ada: '',
   parsel: '',
   status: '',
+  ownership: '',
 };
 
 const uniqueSorted = (values: string[]) =>
@@ -64,11 +67,13 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
     && (!(isSalesSupport || filterVisibility.ada) || !filters.ada || land.ada.toLocaleLowerCase('tr-TR').includes(filters.ada.trim().toLocaleLowerCase('tr-TR')))
     && (!(isSalesSupport || filterVisibility.parsel) || !filters.parsel || land.parsel.toLocaleLowerCase('tr-TR').includes(filters.parsel.trim().toLocaleLowerCase('tr-TR')))
     && (!filters.status || land.status === filters.status)
+    && (!filters.ownership || (land.ownership_type ?? 'MUSTAKIL') === filters.ownership)
   ), [lands, filters, filterVisibility, isSalesSupport]);
 
   const hasActiveFilters = FILTER_FIELDS
     .some(field => (filterVisibility[field] || (isSalesSupport && (field === 'ada' || field === 'parsel'))) && Boolean(filters[field]))
-    || Boolean(filters.status);
+    || Boolean(filters.status)
+    || Boolean(filters.ownership);
   const supportStatusCards: { label: string; status: LandStatus | ''; dot: string; value: number }[] = [
     { label: 'Tüm arsalar', status: '', dot: 'bg-blue-600', value: lands.length },
     { label: 'Satışa Uygun', status: 'BOS', dot: 'bg-emerald-500', value: lands.filter(land => land.status === 'BOS').length },
@@ -84,10 +89,13 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
       'Mahalle': land.mahalle,
       'Ada': land.ada,
       'Parsel': land.parsel,
+      'Tapu Tipi': ownershipLabels[land.ownership_type ?? 'MUSTAKIL'],
+      'Hisse No': land.hisse_no || '',
       'Durum': land.status === 'TAPU' ? 'Tapu Verildi' : statusLabels[land.status],
       'Müşteri': land.customer_name || '—',
       'Telefon': land.customer_phone || '—',
       'Kapora': land.deposit_amount ? Number(land.deposit_amount) : '',
+      'Peşinat': land.down_payment ? Number(land.down_payment) : '',
       'Satış Bedeli': land.sale_price ? Number(land.sale_price) : '',
       'Not': land.reservation_notes || '—',
     }));
@@ -254,6 +262,19 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               </select>
             </label>
           )}
+          <label className="text-xs font-medium text-slate-600">
+            Tapu tipi
+            <select
+              value={filters.ownership}
+              onChange={event => setFilters(current => ({ ...current, ownership: event.target.value as OwnershipType | '' }))}
+              className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+            >
+              <option value="">Müstakil ve hisseli</option>
+              {(Object.entries(ownershipLabels) as [OwnershipType, string][]).map(([type, label]) => (
+                <option key={type} value={type}>{label}</option>
+              ))}
+            </select>
+          </label>
           {isSalesSupport && (
             <button
               type="button"
@@ -284,12 +305,14 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
             Excel'e aktar
           </button>
         </div>
-        <table className="w-full table-fixed border-collapse text-left text-sm md:min-w-[900px] md:table-auto">
+        <table className="w-full table-fixed border-collapse text-left text-sm md:min-w-[1100px] md:table-auto">
           <thead className="sticky top-0 z-10 bg-white">
             <tr>
               <th className="w-[34%] border-b border-slate-200 px-3 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:w-auto md:px-4">Konum</th>
+              <th className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">Merkez uzaklığı</th>
               <th className="w-[12%] border-b border-slate-200 px-1 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:w-auto md:px-4">Ada</th>
               <th className="w-[12%] border-b border-slate-200 px-1 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:w-auto md:px-4">Parsel</th>
+              <th className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">Hisse No</th>
               <th className="w-[26%] border-b border-slate-200 px-2 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:w-auto md:px-4">Durum</th>
               <th className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">Müşteri</th>
               <th className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">Telefon</th>
@@ -303,9 +326,12 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                 <td className="px-3 py-3 md:px-4">
                   <span className="block truncate font-medium text-slate-800">{land.ilce}</span>
                   <span className="mt-0.5 block truncate text-xs text-slate-500">{land.mahalle} · {land.il}</span>
+                  <div className="mt-1 md:hidden"><CenterDistancesInline land={land} /></div>
                 </td>
+                <td className="hidden px-4 py-3 md:table-cell"><CenterDistancesInline land={land} /></td>
                 <td className="break-words px-1 py-3 font-mono text-xs text-slate-700 md:whitespace-nowrap md:px-4 md:text-sm">{land.ada}</td>
-                <td className="break-words px-1 py-3 font-mono text-xs text-slate-700 md:whitespace-nowrap md:px-4 md:text-sm">{land.parsel}</td>
+                <td className="break-words px-1 py-3 font-mono text-xs text-slate-700 md:whitespace-nowrap md:px-4 md:text-sm">{land.parsel}{land.hisse_no && <span className="mt-0.5 block font-sans text-[10px] font-semibold text-violet-700 md:hidden">H.{land.hisse_no}</span>}</td>
+                <td className="hidden whitespace-nowrap px-4 py-3 md:table-cell">{land.hisse_no ? <span className="rounded bg-violet-50 px-2 py-0.5 font-mono text-sm font-semibold text-violet-700">{land.hisse_no}</span> : <span className="text-slate-300">—</span>}</td>
                 <td className="px-2 py-3 md:px-4">
                   <span className={`inline-block max-w-full whitespace-normal rounded-full border px-2 py-1 text-center text-[10px] font-semibold leading-tight md:px-2.5 md:text-xs ${statusColors[land.status]}`}>
                     {land.status === 'TAPU' ? 'Tapu Verildi' : statusLabels[land.status]}
@@ -321,7 +347,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                     type="button"
                   onClick={() => openLand(land)}
                     className="min-w-16 rounded-lg bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition-colors hover:bg-blue-100"
-                    aria-label={`${land.ada} ada ${land.parsel} parsel detaylarını aç`}
+                    aria-label={`${parcelLabel(land)} detaylarını aç`}
                   >
                     Aç
                   </button>
@@ -329,7 +355,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               </tr>
             ))}
             {filteredLands.length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-500">Filtre kriterlerinize uygun arsa bulunamadı.</td></tr>
+              <tr><td colSpan={10} className="px-4 py-12 text-center text-slate-500">Filtre kriterlerinize uygun arsa bulunamadı.</td></tr>
             )}
           </tbody>
         </table>
@@ -349,7 +375,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               <th className="w-[35%] border-b border-slate-200 px-2 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 md:hidden">
                 Durum
               </th>
-              {['İl', 'İlçe', 'Mahalle', 'Ada', 'Parsel', 'Durum', 'Müşteri', 'Telefon', 'Not'].map(label => (
+              {['İl', 'İlçe', 'Mahalle', 'Ada', 'Parsel', 'Hisse No', 'Durum', 'Müşteri', 'Telefon', 'Not', 'Merkez uzaklığı'].map(label => (
                 <th key={label} className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">
                   {label}
                 </th>
@@ -374,11 +400,12 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                     ? 'bg-green-50 hover:bg-green-100 focus:bg-green-100'
                     : 'hover:bg-blue-50/60 focus:bg-blue-50'
                 }`}
-                aria-label={`${land.il}, ${land.ilce}, ${land.mahalle}, ada ${land.ada}, parsel ${land.parsel}; detayları aç`}
+                aria-label={`${land.il}, ${land.ilce}, ${land.mahalle}, ada ${land.ada}, parsel ${land.parsel}${land.hisse_no ? `, hisse ${land.hisse_no}` : ''}; detayları aç`}
               >
                 <td className="break-words px-3 py-3 md:hidden">
-                  <span className="block font-medium text-slate-800">Ada {land.ada} / Parsel {land.parsel}</span>
+                  <span className="block font-medium text-slate-800">{parcelLabel(land)}</span>
                   <span className="mt-1 block text-xs text-slate-600">{land.il}, {land.ilce}, {land.mahalle}</span>
+                  <div className="mt-1"><CenterDistancesInline land={land} /></div>
                   {land.customer_name && <span className="mt-1 block truncate text-xs text-slate-500">{land.customer_name}</span>}
                 </td>
                 <td className="px-2 py-3 md:hidden">
@@ -391,6 +418,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                 <td className="hidden whitespace-nowrap px-4 py-3 text-slate-700 md:table-cell">{land.mahalle}</td>
                 <td className="hidden whitespace-nowrap px-4 py-3 font-mono text-slate-700 md:table-cell">{land.ada}</td>
                 <td className="hidden whitespace-nowrap px-4 py-3 font-mono font-medium text-slate-800 md:table-cell">{land.parsel}</td>
+                <td className="hidden whitespace-nowrap px-4 py-3 md:table-cell">{land.hisse_no ? <span className="rounded bg-violet-50 px-2 py-0.5 font-mono text-sm font-semibold text-violet-700">{land.hisse_no}</span> : <span className="text-slate-300">—</span>}</td>
                 <td className="hidden whitespace-nowrap px-4 py-3 md:table-cell">
                   <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusColors[land.status]}`}>
                     {statusLabels[land.status]}
@@ -403,6 +431,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                     {land.reservation_notes || '—'}
                   </span>
                 </td>
+                <td className="hidden px-4 py-3 md:table-cell"><CenterDistancesInline land={land} /></td>
               </tr>
             ))}
             {filteredLands.length === 0 && (
@@ -410,7 +439,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                 <td colSpan={2} className="px-4 py-12 text-center text-slate-500 md:hidden">
                   Filtre kriterlerinize uygun arsa bulunamadı.
                 </td>
-                <td colSpan={9} className="hidden px-4 py-12 text-center text-slate-500 md:table-cell">
+                <td colSpan={11} className="hidden px-4 py-12 text-center text-slate-500 md:table-cell">
                   Filtre kriterlerinize uygun arsa bulunamadı.
                 </td>
               </tr>

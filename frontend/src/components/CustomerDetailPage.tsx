@@ -6,7 +6,7 @@ import { ArrowLeft, ArrowRight, Flame, MapPin, Pencil, Phone, UserRound } from '
 import { getCustomer, getLands, updateCustomer } from '../api';
 import type { CancelDetail, CancelReason, CustomerInput } from '../api';
 import { OUTCOME_INFO, SOURCE_LABELS, cancelReasonLabel, formatCurrency, formatDate, initials, isHotLead, regionKey } from '../customerDisplay';
-import { statusLabels } from '../types';
+import { statusLabels, parcelLabel } from '../types';
 import WhatsAppButton from './WhatsAppButton';
 
 const CARD = 'rounded-2xl bg-white shadow-[0_4px_24px_rgba(15,35,95,0.06)] ring-1 ring-slate-100';
@@ -210,7 +210,7 @@ export default function CustomerDetailPage({ isAdmin }: { isAdmin: boolean }) {
                     onClick={() => openLand(land.id)}
                     className="rounded-lg bg-white px-3 py-1.5 text-sm text-slate-700 shadow-sm ring-1 ring-rose-100 hover:ring-rose-300"
                   >
-                    {land.mahalle} · Ada {land.ada} / Parsel {land.parsel}
+                    {land.mahalle} · {parcelLabel(land)}
                   </button>
                 </li>
               ))}

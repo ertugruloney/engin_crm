@@ -30,7 +30,8 @@ def normalize_name(name):
 
 
 def land_label(land):
-    return f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
+    share = f' · Hisse {land.hisse_no}' if getattr(land, 'hisse_no', '') else ''
+    return f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}{share}'
 
 
 def find_or_create_customer(full_name, phone):

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { createLand, getTkgmDistricts, getTkgmNeighborhoods, getTkgmProvinces, syncLandFromTkgm } from '../api';
 import type { NewLand, TkgmUnit } from '../api';
+import { ownershipLabels } from '../types';
 
 const FIELD_CLASS =
   'mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400';
@@ -19,6 +20,8 @@ const initialForm: NewLand = {
   mahalle: '',
   ada: '',
   parsel: '',
+  ownership_type: 'MUSTAKIL',
+  hisse_no: '',
   status: 'BOS',
   reservation_notes: '',
   deposit_amount: null,
@@ -190,6 +193,50 @@ export default function CreateLandModal({ onClose }: CreateLandModalProps) {
               </label>
             ))}
           </div>
+
+          <fieldset>
+            <legend className="text-sm font-medium text-slate-700">Tapu tipi</legend>
+            <div className="mt-1 grid grid-cols-2 gap-2">
+              {(['MUSTAKIL', 'HISSELI'] as const).map(type => (
+                <label
+                  key={type}
+                  className={`flex cursor-pointer items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                    form.ownership_type === type
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="ownership_type"
+                    value={type}
+                    checked={form.ownership_type === type}
+                    onChange={() => setForm(current => ({ ...current, ownership_type: type, hisse_no: '' }))}
+                    className="sr-only"
+                  />
+                  {ownershipLabels[type]}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          {form.ownership_type === 'HISSELI' && (
+            <label className="block text-sm font-medium text-slate-700">
+              Hisse No
+              <input
+                type="text"
+                required
+                maxLength={50}
+                value={form.hisse_no ?? ''}
+                onChange={event => setField('hisse_no', event.target.value)}
+                placeholder="ör. 3 ya da 3/10"
+                className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+              <span className="mt-1 block text-xs font-normal text-slate-500">
+                Aynı ada/parselin her hissesi ayrı arsa olarak eklenir; numarayı siz belirlersiniz.
+              </span>
+            </label>
+          )}
 
           <label className="block text-sm font-medium text-slate-700">
             Not (isteğe bağlı)

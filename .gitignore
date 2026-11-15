@@ -10,6 +10,7 @@ __pycache__/
 backend/db.sqlite3
 backend/*.bak
 backend/media/
+backend/private_media/
 
 # Editör ve sistem dosyaları
 .DS_Store

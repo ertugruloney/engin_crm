@@ -5,6 +5,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from django.core.validators import FileExtensionValidator
 from .customers import normalize_phone, sync_customer_to_lands
+from .center_distances import land_center_distances
 from .parcel_links import auto_parcel_query_url, neighborhood_templates
 from .tkgm_sync import TKGM_FIELDS
 from .models import CANCEL_DETAIL_CHOICES, CANCEL_DETAILS_BY_REASON, CANCEL_REASON_CHOICES, Customer, CustomerLandRecord, Land, LandStatusHistory
@@ -17,8 +18,61 @@ def clear_reservation_when_available(attrs):
             'customer_name': '',
             'customer_phone': '',
             'deposit_amount': None,
+            'down_payment': None,
+            # Boşa alınan arsada önceki müşterinin kimlik fotoğrafları tutulmaz (dosyalar görünümde silinir).
+            'id_front_image': None,
+            'id_back_image': None,
         })
     return attrs
+
+
+ID_IMAGE_FIELDS = ('id_front_image', 'id_back_image')
+ID_IMAGE_LABELS = {'id_front_image': 'Kimlik ön yüz', 'id_back_image': 'Kimlik arka yüz'}
+ID_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+def id_image_field(**kwargs):
+    return serializers.ImageField(
+        validators=[FileExtensionValidator(['jpg', 'jpeg', 'png', 'webp'])],
+        write_only=True,
+        **kwargs,
+    )
+
+
+def validate_id_images(attrs, instance):
+    """Rezervden (ya da boştan) kapora aşamasına geçerken kimliğin ön ve arka yüz fotoğrafı zorunludur."""
+    for field in ID_IMAGE_FIELDS:
+        image = attrs.get(field)
+        if image and image.size > ID_IMAGE_MAX_BYTES:
+            raise serializers.ValidationError({field: f'{ID_IMAGE_LABELS[field]} fotoğrafı 10 MB boyutunu aşamaz.'})
+    entering_deposit_stage = (
+        attrs.get('status') == 'KAPORA_ALINDI'
+        and (instance is None or instance.status in ('BOS', 'REZERV'))
+    )
+    if not entering_deposit_stage:
+        return
+    missing = {
+        field: f'Kapora aşamasına geçmek için {ID_IMAGE_LABELS[field].lower()} fotoğrafı yüklenmelidir.'
+        for field in ID_IMAGE_FIELDS
+        if not attrs.get(field) and not (instance is not None and getattr(instance, field))
+    }
+    if missing:
+        raise serializers.ValidationError(missing)
+
+
+class ProtectedIdImageField(serializers.Field):
+    """Kimlik fotoğrafının dosya adresi yerine yetki kontrollü indirme adresini döndürür."""
+
+    def __init__(self, side, **kwargs):
+        self.side = side
+        super().__init__(source='*', read_only=True, **kwargs)
+
+    def to_representation(self, land):
+        if not getattr(land, f'id_{self.side}_image'):
+            return None
+        path = f'/api/lands/{land.pk}/id-images/{self.side}/'
+        request = self.context.get('request')
+        return request.build_absolute_uri(path) if request is not None else path
 
 
 # Türkiye'nin yaklaşık sınırları; enlem/boylamın yer değiştirmesi gibi hataları yakalar.
@@ -42,6 +96,21 @@ def validate_location(attrs, instance):
         host = urlparse(url).hostname or ''
         if host != 'tkgm.gov.tr' and not host.endswith('.tkgm.gov.tr'):
             raise serializers.ValidationError({'parcel_query_url': 'Link, Tapu ve Kadastro (tkgm.gov.tr) adresinden olmalıdır.'})
+
+
+def validate_ownership(attrs, instance):
+    """Hisseli arsada hisse no zorunludur; müstakil arsada hisse no tutulmaz."""
+    if 'ownership_type' not in attrs and instance is None and (attrs.get('hisse_no') or '').strip():
+        # Tapu tipi gönderilmeden hisse no girildiyse arsa hisselidir.
+        attrs['ownership_type'] = 'HISSELI'
+    ownership = attrs.get('ownership_type', instance.ownership_type if instance is not None else 'MUSTAKIL')
+    hisse_no = (attrs.get('hisse_no', instance.hisse_no if instance is not None else '') or '').strip()
+    if ownership == 'HISSELI' and not hisse_no:
+        raise serializers.ValidationError({'hisse_no': 'Hisseli arsalarda hisse no girilmelidir.'})
+    if ownership == 'MUSTAKIL' and hisse_no:
+        if 'hisse_no' in attrs:
+            raise serializers.ValidationError({'hisse_no': 'Müstakil arsada hisse no girilemez; tapu tipini "Hisseli" seçin.'})
+        attrs['hisse_no'] = ''
 
 
 def validate_cancel_reason(attrs, instance):
@@ -108,6 +177,7 @@ class AutoParcelLinkField(serializers.Field):
 
 class RepresentativeLandSerializer(serializers.ModelSerializer):
     parcel_query_url_auto = AutoParcelLinkField()
+
     class Meta:
         model = Land
         fields = [
@@ -117,7 +187,10 @@ class RepresentativeLandSerializer(serializers.ModelSerializer):
             'mahalle',
             'ada',
             'parsel',
+            'ownership_type',
+            'hisse_no',
             'status',
+            'can_take_deposit',
             'reservation_date',
             'customer_name',
             'customer_phone',
@@ -126,22 +199,64 @@ class RepresentativeLandSerializer(serializers.ModelSerializer):
             'longitude',
             'parcel_query_url',
             'parcel_query_url_auto',
+            'city_center_distance_km',
+            'district_center_distance_km',
+            'neighborhood_center_distance_km',
             *TKGM_FIELDS,
         ]
         read_only_fields = ['latitude', 'longitude', 'parcel_query_url', *TKGM_FIELDS]
 
+    city_center_distance_km = serializers.SerializerMethodField()
+    district_center_distance_km = serializers.SerializerMethodField()
+    neighborhood_center_distance_km = serializers.SerializerMethodField()
+    can_take_deposit = serializers.SerializerMethodField()
+
+    def get_can_take_deposit(self, land):
+        """Temsilci rezervdeki her arsada kapora girebilir (boş arsada önce rezerv gerekir).
+
+        Django yönetim panelindeki ayar "yalnızca rezerv" ise hiçbir arsada kapora alınamaz.
+        """
+        if land.status != 'REZERV':
+            return False
+        allowed = self.context.get('representatives_can_take_deposit')
+        if allowed is None:
+            from .auth_views import representatives_can_take_deposit
+
+            allowed = self.context['representatives_can_take_deposit'] = representatives_can_take_deposit()
+        return allowed
+
+    def _center_distances(self, land):
+        return land_center_distances(land, self.context)
+
+    def get_city_center_distance_km(self, land):
+        return self._center_distances(land)['city_center_distance_km']
+
+    def get_district_center_distance_km(self, land):
+        return self._center_distances(land)['district_center_distance_km']
+
+    def get_neighborhood_center_distance_km(self, land):
+        return self._center_distances(land)['neighborhood_center_distance_km']
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        if not self.context.get('show_reservation_details', False):
-            for field in ('reservation_date', 'customer_name', 'customer_phone', 'reservation_notes'):
+        show_details = self.context.get('show_reservation_details', False)
+        if not show_details:
+            for field in ('reservation_date', 'customer_name', 'customer_phone'):
                 data.pop(field, None)
+        # Notlar ayrı bir ayara bağlıdır; müşteri bilgileri gizliyken de gösterilebilir.
+        if not self.context.get('show_notes', show_details):
+            data.pop('reservation_notes', None)
         return data
 
 
-class RepresentativeLandNotesSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Land
-        fields = ['reservation_notes']
+class RepresentativeNoteSerializer(serializers.Serializer):
+    """Temsilcinin eklediği yeni not; mevcut notlar değiştirilmez."""
+
+    note = serializers.CharField(
+        max_length=2000,
+        trim_whitespace=True,
+        error_messages={'blank': 'Not boş olamaz.', 'required': 'Not yazılmalıdır.'},
+    )
 
 
 class LandReservationSerializer(serializers.ModelSerializer):
@@ -158,9 +273,33 @@ class LandReservationSerializer(serializers.ModelSerializer):
         ]
 
 
+class LandDepositSerializer(serializers.Serializer):
+    deposit_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal('0.01'),
+        error_messages={'required': 'Kapora tutarı girilmelidir.', 'min_value': 'Kapora tutarı sıfırdan büyük olmalıdır.'},
+    )
+    id_front_image = id_image_field(
+        error_messages={'required': 'Kimlik ön yüz fotoğrafı yüklenmelidir.', 'invalid': 'Kimlik ön yüzü için geçerli bir fotoğraf yükleyin.'},
+    )
+    id_back_image = id_image_field(
+        error_messages={'required': 'Kimlik arka yüz fotoğrafı yüklenmelidir.', 'invalid': 'Kimlik arka yüzü için geçerli bir fotoğraf yükleyin.'},
+    )
+
+    def validate(self, attrs):
+        validate_id_images(attrs, None)
+        return attrs
+
+
 class LandSerializer(CancelReasonFields, serializers.ModelSerializer):
     status_history = serializers.SerializerMethodField()
+    id_front_image = ProtectedIdImageField('front')
+    id_back_image = ProtectedIdImageField('back')
     parcel_query_url_auto = AutoParcelLinkField()
+    city_center_distance_km = serializers.SerializerMethodField()
+    district_center_distance_km = serializers.SerializerMethodField()
+    neighborhood_center_distance_km = serializers.SerializerMethodField()
 
     class Meta:
         model = Land
@@ -178,11 +317,24 @@ class LandSerializer(CancelReasonFields, serializers.ModelSerializer):
     def get_status_history(self, land):
         return LandStatusHistorySerializer(land.status_history.all(), many=True).data
 
+    def get_city_center_distance_km(self, land):
+        return land_center_distances(land, self.context)['city_center_distance_km']
+
+    def get_district_center_distance_km(self, land):
+        return land_center_distances(land, self.context)['district_center_distance_km']
+
+    def get_neighborhood_center_distance_km(self, land):
+        return land_center_distances(land, self.context)['neighborhood_center_distance_km']
+
     def validate(self, attrs):
         attrs = clear_reservation_when_available(attrs)
+        validate_ownership(attrs, self.instance)
         validate_cancel_reason(attrs, self.instance)
         validate_location(attrs, self.instance)
         validate_deposit_amount(attrs, self.instance)
+        if self.instance is not None:
+            # Excel'den toplu eklemede kimlik istenmez; mevcut arsanın aşaması değişirken istenir.
+            validate_id_images(attrs, self.instance)
         validate_sale_price(attrs, self.instance)
         validate_installment_plan(attrs, self.instance)
         return attrs
@@ -210,8 +362,14 @@ def validate_installment_plan(attrs, instance):
         raise serializers.ValidationError({
             'installment_plan': 'Taksit planı liste biçiminde olmalıdır.'
         })
+    down_payment = attrs.get('down_payment', instance.down_payment if instance is not None else None)
     if not plan:
+        # Peşinat yalnızca taksitli satışta anlamlıdır; peşin satışta tutulmaz.
+        if down_payment is not None:
+            attrs['down_payment'] = None
         return
+    if down_payment is not None and down_payment < 0:
+        raise serializers.ValidationError({'down_payment': 'Peşinat negatif olamaz.'})
 
     item_serializer = InstallmentItemSerializer(data=plan, many=True)
     item_serializer.is_valid(raise_exception=True)
@@ -228,11 +386,15 @@ def validate_installment_plan(attrs, instance):
         raise serializers.ValidationError({
             'sale_price': 'Taksit planı için satış bedeli girilmelidir.'
         })
-    upfront_amount = deposit_amount or Decimal('0')
+    upfront_amount = (deposit_amount or Decimal('0')) + (down_payment or Decimal('0'))
     remaining_amount = sale_price - upfront_amount
-    if remaining_amount <= 0 or sum(amounts) != remaining_amount:
+    if remaining_amount <= 0:
         raise serializers.ValidationError({
-            'installment_plan': 'Taksitlerin toplamı, peşinat düşüldükten sonraki kalan satış bedeline eşit olmalıdır.'
+            'down_payment': 'Kapora ve peşinat toplamı satış bedelinden küçük olmalıdır.'
+        })
+    if sum(amounts) != remaining_amount:
+        raise serializers.ValidationError({
+            'installment_plan': 'Taksitlerin toplamı, kapora ve peşinat düşüldükten sonraki kalan satış bedeline eşit olmalıdır.'
         })
 
 
@@ -247,6 +409,8 @@ class LandStatusSerializer(CancelReasonFields, serializers.ModelSerializer):
         allow_null=True,
         validators=[FileExtensionValidator(['jpg', 'jpeg', 'png', 'webp'])],
     )
+    id_front_image = id_image_field(required=False, allow_null=True)
+    id_back_image = id_image_field(required=False, allow_null=True)
 
     class Meta:
         model = Land
@@ -258,8 +422,11 @@ class LandStatusSerializer(CancelReasonFields, serializers.ModelSerializer):
             'reservation_notes',
             'deposit_amount',
             'sale_price',
+            'down_payment',
             'installment_plan',
             'title_deed_image',
+            'id_front_image',
+            'id_back_image',
             'cancel_reason',
             'cancel_detail',
             'cancel_note',
@@ -269,6 +436,7 @@ class LandStatusSerializer(CancelReasonFields, serializers.ModelSerializer):
         attrs = clear_reservation_when_available(attrs)
         validate_cancel_reason(attrs, self.instance)
         validate_deposit_amount(attrs, self.instance)
+        validate_id_images(attrs, self.instance)
         validate_sale_price(attrs, self.instance)
         validate_installment_plan(attrs, self.instance)
         validate_title_deed_image(attrs, self.instance)

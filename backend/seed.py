@@ -18,6 +18,12 @@ def seed():
         {'il': 'İstanbul', 'ilce': 'Çatalca', 'mahalle': 'İzzettin', 'ada': '402', 'parsel': '5', 'status': 'TAPU'},
         {'il': 'İstanbul', 'ilce': 'Çatalca', 'mahalle': 'İzzettin', 'ada': '402', 'parsel': '6', 'status': 'BOS'},
         {'il': 'Tekirdağ', 'ilce': 'Çerkezköy', 'mahalle': 'Kızılpınar', 'ada': '50', 'parsel': '1', 'status': 'BOS'},
+        # Hisseli parsel: 10 hisseye bölünmüş, her hisse ayrı arsa olarak satılır.
+        *[
+            {'il': 'Tekirdağ', 'ilce': 'Çorlu', 'mahalle': 'Esentepe', 'ada': '45', 'parsel': '7',
+             'ownership_type': 'HISSELI', 'hisse_no': str(number), 'status': 'REZERV' if number <= 3 else 'BOS'}
+            for number in range(1, 11)
+        ],
     ]
 
     for data in lands:

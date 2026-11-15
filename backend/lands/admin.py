@@ -6,8 +6,8 @@ from .notifications import notify
 
 @admin.register(RepresentativeSettings)
 class RepresentativeSettingsAdmin(admin.ModelAdmin):
-    fields = ['sales_representatives_can_view_reservation_details']
-    list_display = ['sales_representatives_can_view_reservation_details']
+    fields = ['sales_representatives_can_view_reservation_details', 'representatives_can_add_notes', 'representative_max_stage']
+    list_display = ['sales_representatives_can_view_reservation_details', 'representatives_can_add_notes', 'representative_max_stage']
 
     def has_add_permission(self, request):
         return not RepresentativeSettings.objects.exists()
@@ -18,7 +18,16 @@ class RepresentativeSettingsAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         field = 'sales_representatives_can_view_reservation_details'
         previous = RepresentativeSettings.objects.filter(pk=1).values_list(field, flat=True).first()
+        tracked = ('representative_max_stage', 'representatives_can_add_notes')
+        previous_values = RepresentativeSettings.objects.filter(pk=1).values(*tracked).first()
         super().save_model(request, obj, form, change)
+        changes = {
+            name: {'old': previous_values[name], 'new': getattr(obj, name)}
+            for name in tracked
+            if previous_values is not None and previous_values[name] != getattr(obj, name)
+        }
+        if changes:
+            record_admin_action(request, 'settings.updated', 'representative_settings', obj.pk, changes)
         if previous is not None and previous != getattr(obj, field):
             record_admin_action(
                 request,

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,7 +26,10 @@ SECRET_KEY = 'django-insecure-8^fc6o&))(i@#6z$j8nyla#$-%50+pmvtx6%7@tfc*2z!l@43h
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+NGROK_HOST = os.environ.get('NGROK_HOST', '').strip().lower()
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.ngrok-free.app']
+if NGROK_HOST:
+    ALLOWED_HOSTS.append(NGROK_HOST)
 
 
 # Application definition
@@ -59,6 +63,10 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+CSRF_TRUSTED_ORIGINS.append('https://*.ngrok-free.app')
+if NGROK_HOST:
+    CSRF_TRUSTED_ORIGINS.append(f'https://{NGROK_HOST}')
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -137,6 +145,8 @@ USE_TZ = True
 STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+# Kimlik fotoğrafları gibi hassas yüklemeler; web sunucusundan doğrudan sunulmaz (bkz. lands/private_files.py).
+PRIVATE_MEDIA_ROOT = BASE_DIR / 'private_media'
 
 
 # Email

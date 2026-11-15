@@ -37,11 +37,18 @@ NOTIFICATION_DEFINITIONS = [
         'message': '{actor_username}, {land_label} arsasını {customer_name} için rezerve etti.',
     },
     {
+        'code': 'land.deposit_taken',
+        'label': 'Kapora alındı',
+        'description': 'Bir satış temsilcisi bir arsa için kapora girdiğinde yöneticiye bildirim gönderir.',
+        'title': 'Kapora alındı',
+        'message': '{actor_username}, {land_label} arsası için {customer_name} adına {deposit_amount} kapora aldı.',
+    },
+    {
         'code': 'land.notes_updated',
-        'label': 'Arsa notu güncellendi',
-        'description': 'Bir satış temsilcisi arsa notunu güncellediğinde yöneticiye bildirim gönderir.',
-        'title': 'Arsa notu güncellendi',
-        'message': '{actor_username}, {land_label} arsasının notunu güncelledi.',
+        'label': 'Arsaya not eklendi',
+        'description': 'Bir satış temsilcisi bir arsaya not eklediğinde yöneticiye bildirim gönderir.',
+        'title': 'Arsaya not eklendi',
+        'message': '{actor_username}, {land_label} arsasına not ekledi: "{note}"',
     },
     {
         'code': 'settings.updated',

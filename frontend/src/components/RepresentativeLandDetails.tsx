@@ -2,36 +2,43 @@ import { useState } from 'react';
 import { isAxiosError } from 'axios';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { MapPin, Phone, X } from 'lucide-react';
-import { updateRepresentativeLandNotes } from '../api';
+import { addRepresentativeLandNote } from '../api';
 import type { RepresentativeLand } from '../api';
-import { statusColors, statusLabels } from '../types';
-import LandHistory from './LandHistory';
+import { statusColors, statusLabels, parcelLabel } from '../types';
 import LandLocationCard from './LandLocationCard';
+import type { ReserveLandMode } from './ReserveLandModal';
 
 interface RepresentativeLandDetailsProps {
   land: RepresentativeLand;
   canViewReservationDetails: boolean;
+  // Arsa notlarını görme ve not ekleme (Django yönetim panelindeki ayar); müşteri bilgilerinden bağımsız.
+  canAddNotes: boolean;
   onClose: () => void;
-  onReserve: (land: RepresentativeLand) => void;
+  onReserve: (land: RepresentativeLand, mode: ReserveLandMode) => void;
 }
 
 export default function RepresentativeLandDetails({
   land,
   canViewReservationDetails,
+  canAddNotes,
   onClose,
   onReserve,
 }: RepresentativeLandDetailsProps) {
   const queryClient = useQueryClient();
-  const [notes, setNotes] = useState(land.reservation_notes || '');
+  // Kapora rezervdeki arsada alınır (kim rezerve etmiş olursa olsun); satışa uygun arsada önce rezerv gerekir.
+  const canTakeDeposit = land.status === 'REZERV' && Boolean(land.can_take_deposit);
+  // Mevcut notlar salt okunur; temsilci yalnızca yeni not ekler (tarih ve kullanıcı adıyla sona yazılır).
+  const [existingNotes, setExistingNotes] = useState(land.reservation_notes || '');
+  const [newNote, setNewNote] = useState('');
   const mutation = useMutation({
-    mutationFn: () => updateRepresentativeLandNotes(land.id, notes),
+    mutationFn: () => addRepresentativeLandNote(land.id, newNote.trim()),
     onSuccess: async updatedLand => {
+      setExistingNotes(updatedLand.reservation_notes || '');
+      setNewNote('');
       queryClient.setQueryData<RepresentativeLand[]>(['representativeLands'], current =>
         current?.map(item => item.id === updatedLand.id ? updatedLand : item),
       );
       await queryClient.invalidateQueries({ queryKey: ['representativeLands'] });
-      await queryClient.invalidateQueries({ queryKey: ['landHistory', updatedLand.id] });
-      onClose();
     },
   });
 
@@ -61,7 +68,7 @@ export default function RepresentativeLandDetails({
         <header className="flex items-start justify-between border-b border-slate-100 p-6">
           <div>
             <h2 id="representative-land-details-title" className="text-2xl font-bold text-slate-800">
-              Ada {land.ada} / Parsel {land.parsel}
+              {parcelLabel(land)}
             </h2>
             <p className="mt-1 flex items-center gap-1 text-sm text-slate-500">
               <MapPin size={14} />
@@ -104,50 +111,74 @@ export default function RepresentativeLandDetails({
             </section>
           )}
 
-          {canViewReservationDetails ? <form
-            onSubmit={event => {
-              event.preventDefault();
-              mutation.mutate();
-            }}
-            className="space-y-3"
-          >
-            <label htmlFor="representative-land-notes" className="block font-semibold text-slate-800">
-              Arsa notu
-            </label>
-            <textarea
-              id="representative-land-notes"
-              rows={6}
-              maxLength={10000}
-              value={notes}
-              onChange={event => setNotes(event.target.value)}
-              placeholder="Arsayla ilgili notları yazın..."
-              className="block w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            />
-            {errorMessage && <p role="alert" className="text-sm text-red-600">Not kaydedilemedi: {errorMessage}</p>}
-            <button
-              type="submit"
-              disabled={mutation.isPending || notes === (land.reservation_notes || '')}
-              className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {mutation.isPending ? 'Kaydediliyor...' : 'Notu kaydet'}
-            </button>
-          </form> : (
+          {canAddNotes ? (
+            <section className="space-y-3">
+              <h3 className="font-semibold text-slate-800">Arsa notları</h3>
+              {existingNotes.trim() ? (
+                <div className="max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700">
+                  {existingNotes}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400">Bu arsaya henüz not eklenmemiş.</p>
+              )}
+              <form
+                onSubmit={event => {
+                  event.preventDefault();
+                  if (newNote.trim()) mutation.mutate();
+                }}
+                className="space-y-2"
+              >
+                <label htmlFor="representative-land-note" className="sr-only">Yeni not</label>
+                <textarea
+                  id="representative-land-note"
+                  rows={3}
+                  maxLength={2000}
+                  value={newNote}
+                  onChange={event => setNewNote(event.target.value)}
+                  placeholder="Yeni not yazın (ör. müşteri hafta sonu yeri görmeye gelecek)..."
+                  className="block w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+                {errorMessage && <p role="alert" className="text-sm text-red-600">Not eklenemedi: {errorMessage}</p>}
+                {mutation.isSuccess && !newNote && <p role="status" className="text-sm text-emerald-700">Not eklendi.</p>}
+                <button
+                  type="submit"
+                  disabled={mutation.isPending || !newNote.trim()}
+                  className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {mutation.isPending ? 'Ekleniyor...' : 'Notu ekle'}
+                </button>
+                <p className="text-[11px] text-slate-400">Not, tarih ve kullanıcı adınızla eklenir; mevcut notlar değiştirilemez.</p>
+              </form>
+            </section>
+          ) : (
             <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-              Arsa notları ve rezervasyon bilgileri yönetici ayarları nedeniyle gizlenmiştir.
+              Arsa notları yönetici ayarları nedeniyle gizlenmiştir.
             </p>
           )}
 
-          {land.status === 'BOS' && (
-            <button
-              type="button"
-              onClick={() => onReserve(land)}
-              className="w-full rounded-lg border border-blue-200 px-4 py-2.5 text-sm font-semibold text-blue-700 hover:bg-blue-50"
-            >
-              Bu arsayı rezerve et
-            </button>
+          {(land.status === 'BOS' || canTakeDeposit) && (
+            <div className="space-y-2">
+              {land.status === 'BOS' && (
+                <button
+                  type="button"
+                  onClick={() => onReserve(land, 'reserve')}
+                  className="w-full rounded-lg border border-blue-200 px-4 py-2.5 text-sm font-semibold text-blue-700 hover:bg-blue-50"
+                >
+                  Bu arsayı rezerve et
+                </button>
+              )}
+              {canTakeDeposit && (
+                <button
+                  type="button"
+                  onClick={() => onReserve(land, 'deposit')}
+                  className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  Kapora alındı
+                </button>
+              )}
+            </div>
           )}
 
-          <LandHistory landId={land.id} />
         </div>
       </section>
     </div>

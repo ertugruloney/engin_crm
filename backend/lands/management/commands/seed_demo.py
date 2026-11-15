@@ -18,7 +18,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from lands.auth_views import VIEWER_GROUP
-from lands.customers import sync_land_customer
+from lands.customers import land_label, sync_land_customer
 from lands.models import AuditLog, Customer, CustomerLandRecord, Land, LandStatusHistory, cancel_reason_text
 
 DEMO_NOTE = '[DEMO] Örnek veri'
@@ -88,6 +88,10 @@ CANCEL_REASONS = [
 LAND_COUNT = 170
 # Durum dağılımı (toplam LAND_COUNT)
 STATUS_PLAN = ['TAPU'] * 70 + ['KAPORA_ALINDI'] * 25 + ['REZERV'] * 30 + ['BOS'] * 45
+# Hisseli parseller: her adımda bu olasılıkla yeni bir hisseli parsel başlar; parsel SHARE_COUNT_RANGE kadar
+# hisseye bölünür ve sonraki arsalar bu parselin hisseleri olur (hisse no 1, 2, 3 ...).
+SHARE_GROUP_CHANCE = 0.06
+SHARE_COUNT_RANGE = (4, 10)
 
 
 class Command(BaseCommand):
@@ -177,20 +181,51 @@ class Command(BaseCommand):
             days = min(max_days, int(rng.betavariate(1.1, 2.2) * max_days))
             return now - timedelta(days=days, hours=rng.randint(0, 20), minutes=rng.randint(0, 59))
 
+        share_group = None
         for index, status in enumerate(statuses):
-            il = rng.choices(city_names, weights=city_weights)[0]
-            districts, _, multiplier = CITIES[il]
-            ilce = rng.choice(districts)
-            price = Decimal(round(rng.uniform(1.2, 6.5) * multiplier * 1_000_000, -4))
+            if share_group is None and rng.random() < SHARE_GROUP_CHANCE:
+                group_il = rng.choices(city_names, weights=city_weights)[0]
+                share_group = {
+                    'il': group_il,
+                    'ilce': rng.choice(CITIES[group_il][0]),
+                    'mahalle': f'{rng.choice(MAHALLELER)} Mah.',
+                    'ada': str(rng.randint(100, 999)),
+                    'parsel': str(index + 1),
+                    # Liste sonuna denk gelen parsel yarım kalmasın.
+                    'total': min(rng.randint(*SHARE_COUNT_RANGE), len(statuses) - index),
+                    'next': 1,
+                }
+            if share_group is not None:
+                il, ilce, mahalle = share_group['il'], share_group['ilce'], share_group['mahalle']
+                ada, parsel = share_group['ada'], share_group['parsel']
+                ownership_type, hisse_no = 'HISSELI', str(share_group['next'])
+                multiplier = CITIES[il][2]
+                # Bir hisse, parselin payına düşen tutardan biraz pahalı satılır.
+                price = Decimal(round(
+                    rng.uniform(1.2, 6.5) * multiplier * 1_000_000 / share_group['total'] * rng.uniform(1.1, 1.3), -3,
+                ))
+                share_group['next'] += 1
+                if share_group['next'] > share_group['total']:
+                    share_group = None
+            else:
+                il = rng.choices(city_names, weights=city_weights)[0]
+                districts, _, multiplier = CITIES[il]
+                ilce = rng.choice(districts)
+                mahalle = f'{rng.choice(MAHALLELER)} Mah.'
+                ada, parsel = str(rng.randint(100, 999)), str(index + 1)
+                ownership_type, hisse_no = 'MUSTAKIL', ''
+                price = Decimal(round(rng.uniform(1.2, 6.5) * multiplier * 1_000_000, -4))
             customer, phone = pick_person() if status != 'BOS' else ('', '')
             rep, _ = rng.choices(reps, weights=[weight for _, weight in reps])[0]
 
             land = Land.objects.create(
                 il=il,
                 ilce=ilce,
-                mahalle=f'{rng.choice(MAHALLELER)} Mah.',
-                ada=str(rng.randint(100, 999)),
-                parsel=str(index + 1),
+                mahalle=mahalle,
+                ada=ada,
+                parsel=parsel,
+                ownership_type=ownership_type,
+                hisse_no=hisse_no,
                 status=status,
                 is_reserved=status != 'BOS',
                 reservation_notes=DEMO_NOTE,
@@ -201,7 +236,7 @@ class Command(BaseCommand):
                 sale_price=price if status in ('TAPU', 'KAPORA_ALINDI') or rng.random() < 0.3 else None,
                 deposit_amount=(price * Decimal('0.1')).quantize(Decimal('1')) if status in ('TAPU', 'KAPORA_ALINDI') else None,
             )
-            label = f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
+            label = land_label(land)
             if status == 'BOS':
                 # Boş arsaların yarısında geçmişte bozulmuş bir rezervasyon olsun (yeniden aranacak müşteri).
                 if rng.random() < 0.5:
@@ -271,8 +306,11 @@ class Command(BaseCommand):
 
         sold = Land.objects.filter(reservation_notes__startswith='[DEMO]', status='TAPU')
         total = sum((land.sale_price or 0) for land in sold)
+        shares = Land.objects.filter(reservation_notes__startswith='[DEMO]', ownership_type='HISSELI')
+        shared_parcels = shares.values('il', 'ilce', 'mahalle', 'ada', 'parsel').distinct().count()
         self.stdout.write(self.style.SUCCESS(
-            f'{len(statuses)} demo arsa, {demo_customers.count()} demo müşteri, {len(reps)} demo temsilci ve '
+            f'{len(statuses)} demo arsa ({shared_parcels} hisseli parselde {shares.count()} hisse), '
+            f'{demo_customers.count()} demo müşteri, {len(reps)} demo temsilci ve '
             f'{len(audit_rows)} aktivite eklendi. '
             f'Toplam satış: ₺{total:,.0f}. Demo temsilci şifresi: {DEMO_PASSWORD}'
         ))

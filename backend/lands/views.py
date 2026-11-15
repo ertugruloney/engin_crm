@@ -1,3 +1,4 @@
+import mimetypes
 import unicodedata
 
 from rest_framework import viewsets, status
@@ -5,14 +6,31 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 from django.db import transaction
+from django.http import FileResponse, Http404
 from .audit import model_snapshot, record_admin_action, record_user_action
-from .customers import sync_land_customer
+from .customers import land_label, sync_land_customer
 from .parcel_links import learn_from_land
 from . import tkgm
 from .tkgm_sync import LOCATION_IDENTITY_FIELDS, ParcelNotFound, clear_tkgm_fields, sync_land_from_tkgm
 from .models import Land, LandStatusHistory, cancel_reason_text
 from .serializers import LandSerializer, LandStatusSerializer
-from .auth_views import is_sales_representative, is_sales_support, representative_reservation_details_visible
+from .auth_views import IsAdminOrSalesSupport, is_sales_representative, is_sales_support, representative_reservation_details_visible
+from .private_files import delete_stored_files
+from .serializers import ID_IMAGE_FIELDS
+
+
+def id_image_names(land):
+    return {field: getattr(land, field).name if getattr(land, field) else '' for field in ID_IMAGE_FIELDS}
+
+
+def delete_replaced_id_images(previous_names, land):
+    """Değişen ya da kaldırılan (ör. arsa boşa alınınca) kimlik fotoğraflarını diskten siler."""
+    current = id_image_names(land)
+    delete_stored_files(name for field, name in previous_names.items() if name and name != current[field])
+
+
+# Hisseli parsellerde aynı ada/parsel birden çok kez bulunur; hisse no ile ayrılır.
+LAND_KEY_FIELDS = ('il', 'ilce', 'mahalle', 'ada', 'parsel', 'hisse_no')
 
 
 def normalized_land_key(values):
@@ -24,7 +42,7 @@ def normalized_land_key(values):
         ).split())
 
     get_value = values.get if isinstance(values, dict) else lambda field: getattr(values, field)
-    return tuple(normalize(get_value(field)) for field in ('il', 'ilce', 'mahalle', 'ada', 'parsel'))
+    return tuple(normalize(get_value(field) or '') for field in LAND_KEY_FIELDS)
 
 
 class LandRolePermission(BasePermission):
@@ -69,7 +87,7 @@ class LandViewSet(viewsets.ModelViewSet):
             'land',
             land.pk,
             {
-                'land_label': f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}',
+                'land_label': land_label(land),
                 'created': model_snapshot(land),
             },
         )
@@ -81,7 +99,9 @@ class LandViewSet(viewsets.ModelViewSet):
         cancel_note = serializer.validated_data.pop('cancel_note', '').strip()
         previous = model_snapshot(serializer.instance)
         previous_status = serializer.instance.status
+        previous_id_images = id_image_names(serializer.instance)
         land = serializer.save()
+        transaction.on_commit(lambda: delete_replaced_id_images(previous_id_images, land))
         current = model_snapshot(land)
         changes = {
             field: {'old': previous.get(field), 'new': current.get(field)}
@@ -94,7 +114,7 @@ class LandViewSet(viewsets.ModelViewSet):
                 if cancel_note:
                     changes['cancel_note'] = {'old': None, 'new': cancel_note}
             changes['land_label'] = (
-                f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
+                land_label(land)
             )
             self.record_land_action(
                 self.request,
@@ -147,7 +167,7 @@ class LandViewSet(viewsets.ModelViewSet):
             'land',
             land.pk,
             {
-                'land_label': f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}',
+                'land_label': land_label(land),
                 'tkgm_mahalle_id': land.tkgm_mahalle_id,
                 'parcel_area': str(land.parcel_area) if land.parcel_area is not None else None,
                 'parcel_quality': land.parcel_quality,
@@ -155,6 +175,24 @@ class LandViewSet(viewsets.ModelViewSet):
         )
         land.refresh_from_db()
         return Response(self.get_serializer(land).data)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path=r'id-images/(?P<side>front|back)',
+        permission_classes=[IsAdminOrSalesSupport],
+    )
+    def id_image(self, request, pk=None, side=None):
+        """Kimlik fotoğrafını yalnızca yönetici ve satış destek görebilir; dosya herkese açık adreste durmaz."""
+        land = self.get_object()
+        image = getattr(land, f'id_{side}_image')
+        if not image:
+            raise Http404
+        content_type = mimetypes.guess_type(image.name)[0] or 'application/octet-stream'
+        response = FileResponse(image.open('rb'), content_type=content_type)
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @action(detail=True, methods=['patch'], url_path='change-status')
     def change_status(self, request, pk=None):
@@ -172,13 +210,22 @@ class LandViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 existing_keys = {
                     normalized_land_key(land)
-                    for land in Land.objects.only('il', 'ilce', 'mahalle', 'ada', 'parsel')
+                    for land in Land.objects.only(*LAND_KEY_FIELDS)
                 }
                 seen_keys = set(existing_keys)
+                # Bir parsel ya müstakil ya hisselidir; aynı ada/parsel iki tipte birden girilemez.
+                parcel_types = {
+                    normalized_land_key(land)[:-1]: land.ownership_type
+                    for land in Land.objects.only(*LAND_KEY_FIELDS, 'ownership_type')
+                }
                 duplicate_rows = []
+                mixed_rows = []
                 for index, values in enumerate(serializer.validated_data, start=2):
                     key = normalized_land_key(values)
-                    if key in seen_keys:
+                    ownership = values.get('ownership_type', 'MUSTAKIL')
+                    if parcel_types.setdefault(key[:-1], ownership) != ownership:
+                        mixed_rows.append(index)
+                    elif key in seen_keys:
                         duplicate_rows.append(index)
                     else:
                         seen_keys.add(key)
@@ -186,6 +233,11 @@ class LandViewSet(viewsets.ModelViewSet):
                     return Response({
                         'detail': 'Excel dosyasında veya sistemde zaten bulunan arsalar aktarılmadı. Yinelenen satırları kaldırıp tekrar deneyin.',
                         'duplicate_rows': duplicate_rows,
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if mixed_rows:
+                    return Response({
+                        'detail': 'Aynı ada/parsel hem müstakil hem hisseli olarak girilemez. Tapu tipini kontrol edin.',
+                        'duplicate_rows': mixed_rows,
                     }, status=status.HTTP_400_BAD_REQUEST)
                 lands = serializer.save()
                 for land in lands:
@@ -209,6 +261,8 @@ class LandViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def perform_destroy(self, instance):
+        id_images = id_image_names(instance)
+        transaction.on_commit(lambda: delete_stored_files(id_images.values()))
         with transaction.atomic():
             record_admin_action(
                 self.request,
@@ -216,7 +270,7 @@ class LandViewSet(viewsets.ModelViewSet):
                 'land',
                 instance.pk,
                 {
-                    'land_label': f'{instance.il}, {instance.ilce}, {instance.mahalle}, Ada {instance.ada} / Parsel {instance.parsel}',
+                    'land_label': land_label(instance),
                     'deleted': model_snapshot(instance),
                 },
             )

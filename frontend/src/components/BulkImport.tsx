@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as xlsx from 'xlsx';
 import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Trash2 } from 'lucide-react';
 import { bulkCreateLands, getLands } from '../api';
-import { statusLabels } from '../types';
-import type { Land, LandStatus } from '../types';
+import { ownershipLabels, statusLabels } from '../types';
+import type { Land, LandStatus, OwnershipType } from '../types';
 import { useNavigate } from 'react-router-dom';
 
 type NewLand = Omit<Land, 'id' | 'title_deed_image'>;
@@ -37,8 +37,9 @@ const normalizeSalePrice = (value: unknown): string | null => {
   return normalized && Number.isFinite(Number(normalized)) ? normalized : null;
 };
 
-const getLandKey = (land: Pick<Land, 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel'>) =>
-  [land.il, land.ilce, land.mahalle, land.ada, land.parsel].map(normalizeLandPart).join('|');
+// Hisseli parsellerde aynı ada/parsel birden çok satırda olur; hisse no ile ayrılır.
+const getLandKey = (land: Pick<Land, 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel' | 'hisse_no'>) =>
+  [land.il, land.ilce, land.mahalle, land.ada, land.parsel, land.hisse_no ?? ''].map(normalizeLandPart).join('|');
 
 const formatSalePrice = (value: string | null) =>
   value
@@ -69,6 +70,15 @@ const normalizeLandStatus = (value: unknown): LandStatus | null => {
     tapu: 'TAPU',
   };
   return statuses[normalized] ?? null;
+};
+
+// Tapu Tipi sütunu boşsa hisse no girilen satır hisseli, diğerleri müstakil sayılır.
+const normalizeOwnershipType = (value: unknown, hisseNo: string): OwnershipType | null => {
+  const normalized = normalizeColumnName(String(value ?? ''));
+  if (!normalized) return hisseNo ? 'HISSELI' : 'MUSTAKIL';
+  if (normalized.startsWith('mustakil')) return 'MUSTAKIL';
+  if (normalized.startsWith('hisse')) return 'HISSELI';
+  return null;
 };
 
 const getCell = (row: Record<string, unknown>, ...columnNames: string[]) => {
@@ -153,6 +163,7 @@ export default function BulkImport({
 
         const invalidStatuses: string[] = [];
         const invalidSalePrices: string[] = [];
+        const invalidOwnership: string[] = [];
         const parsedData: NewLand[] = rawData.map((row, index) => {
           const rawStatus = getCell(row, 'Durum', 'Status');
           const status = normalizeLandStatus(rawStatus);
@@ -161,6 +172,16 @@ export default function BulkImport({
           if (status === 'TAPU' && (!salePrice || Number(salePrice) <= 0)) {
             invalidSalePrices.push(`${index + 2}. satır`);
           }
+          const hisseNo = String(getCell(row, 'Hisse No', 'Hisse', 'Hisse Numarası', 'Pay No')).trim();
+          const rawOwnership = getCell(row, 'Tapu Tipi', 'Tapu Türü', 'Hisseli/Müstakil', 'Mülkiyet');
+          const ownershipType = normalizeOwnershipType(rawOwnership, hisseNo);
+          if (!ownershipType) {
+            invalidOwnership.push(`${index + 2}. satır: "${String(rawOwnership)}" tanınmadı`);
+          } else if (ownershipType === 'HISSELI' && !hisseNo) {
+            invalidOwnership.push(`${index + 2}. satır: hisseli ama Hisse No boş`);
+          } else if (ownershipType === 'MUSTAKIL' && hisseNo) {
+            invalidOwnership.push(`${index + 2}. satır: müstakil ama Hisse No dolu`);
+          }
 
           return {
             il: String(getCell(row, 'İl')),
@@ -168,6 +189,8 @@ export default function BulkImport({
             mahalle: String(getCell(row, 'Mahalle')),
             ada: String(getCell(row, 'Ada No', 'Ada')),
             parsel: String(getCell(row, 'Parsel No', 'Parsel')),
+            ownership_type: ownershipType ?? 'MUSTAKIL',
+            hisse_no: ownershipType === 'HISSELI' ? hisseNo : '',
             status: status ?? 'BOS',
             is_reserved: false,
             reservation_notes: String(getCell(row, 'Not', 'Notes')),
@@ -188,6 +211,9 @@ export default function BulkImport({
         } else if (invalidStatuses.length > 0) {
           setData([]);
           setError(`Durum bilgisi tanınmayan satırlar var: ${invalidStatuses.join(', ')}. Durum için Satışa Uygun, Rezerv, Kapora Alındı veya Tapu kullanın.`);
+        } else if (invalidOwnership.length > 0) {
+          setData([]);
+          setError(`Tapu tipi / hisse no hatalı satırlar var: ${invalidOwnership.join('; ')}. Tapu Tipi için Müstakil veya Hisseli yazın; hisseli satırlarda Hisse No zorunludur.`);
         } else if (invalidSalePrices.length > 0) {
           setData([]);
           setError(`Tapu durumundaki arsalar için sıfırdan büyük Satış Bedeli girilmelidir: ${invalidSalePrices.join(', ')}.`);
@@ -284,6 +310,10 @@ export default function BulkImport({
           <div>
             <strong>Excel sütunları:</strong> İl, İlçe, Mahalle, Ada No, Parsel No ve Durum.
             Başlıklar büyük/küçük harfe duyarsızdır. Durum değerleri: Satışa Uygun, Rezerv, Kapora Alındı veya Tapu. Tapu durumu için Satış Bedeli sütunu zorunludur. Not, Enlem, Boylam ve Parsel Sorgu Linki sütunları isteğe bağlıdır.
+            <br />
+            <strong>Tapu tipi:</strong> İsteğe bağlı <strong>Tapu Tipi</strong> sütununa Müstakil veya Hisseli yazın (boşsa müstakil sayılır).
+            Hisseli parselde her hisse için ayrı satır açın ve <strong>Hisse No</strong> sütununa numarasını yazın (ör. 1, 2, … 10 ya da 1/10).
+            Aynı ada/parselde her hisse no yalnızca bir kez kullanılabilir; bir parsel hem müstakil hem hisseli olamaz.
           </div>
         </div>
       </div>
@@ -346,6 +376,8 @@ export default function BulkImport({
                   <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Mahalle</th>
                   <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Ada</th>
                   <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Parsel</th>
+                  <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Tapu Tipi</th>
+                  <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Hisse No</th>
                   <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Durum</th>
                   <th className="py-3 px-6 text-slate-500 font-semibold border-b border-slate-200">Satış Bedeli</th>
                 </tr>
@@ -358,6 +390,8 @@ export default function BulkImport({
                     <td className="py-2.5 px-6 text-slate-700">{row.mahalle}</td>
                     <td className="py-2.5 px-6 font-medium text-slate-800">{row.ada}</td>
                     <td className="py-2.5 px-6 font-medium text-slate-800">{row.parsel}</td>
+                    <td className="py-2.5 px-6 text-slate-700">{ownershipLabels[row.ownership_type ?? 'MUSTAKIL']}</td>
+                    <td className="py-2.5 px-6 text-slate-700">{row.hisse_no || '—'}</td>
                     <td className="py-2.5 px-6 text-slate-700">{statusLabels[row.status]}</td>
                     <td className="py-2.5 px-6 text-slate-700">{formatSalePrice(row.sale_price)}</td>
                   </tr>

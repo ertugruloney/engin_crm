@@ -10,7 +10,7 @@ export interface AppUser {
 }
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api/',
+  baseURL: '/api/',
   withCredentials: true,
   withXSRFToken: true,
   xsrfCookieName: 'csrftoken',
@@ -47,14 +47,19 @@ export type RepresentativeLand = Pick<
   | 'ada'
   | 'parsel'
   | 'status'
-> & Partial<Pick<
+> & { can_take_deposit?: boolean } & Partial<Pick<
   Land,
+  | 'ownership_type'
+  | 'hisse_no'
   | 'reservation_date'
   | 'customer_name'
   | 'customer_phone'
   | 'reservation_notes'
   | 'latitude'
   | 'longitude'
+  | 'city_center_distance_km'
+  | 'district_center_distance_km'
+  | 'neighborhood_center_distance_km'
   | 'parcel_query_url'
   | 'parcel_query_url_auto'
   | 'tkgm_mahalle_id'
@@ -68,6 +73,10 @@ export type RepresentativeLand = Pick<
 
 export interface RepresentativeSettings {
   can_view_reservation_details: boolean;
+  // Satış temsilcisinin ilerletebileceği son aşama (Django yönetim panelinden ayarlanır).
+  max_stage?: 'REZERV' | 'KAPORA_ALINDI';
+  // Arsa notlarını görme ve not ekleme (müşteri bilgisi görünürlüğünden bağımsız).
+  can_add_notes?: boolean;
 }
 
 export interface LandReservation {
@@ -90,12 +99,43 @@ export const reserveLand = async (id: number, reservation: LandReservation): Pro
   return data;
 };
 
-export const updateRepresentativeLandNotes = async (
-  id: number,
-  reservation_notes: string,
-): Promise<RepresentativeLand> => {
-  const { data } = await api.patch(`representative/lands/${id}/notes/`, { reservation_notes });
+export interface LandDeposit {
+  deposit_amount: string;
+  id_front_image: File;
+  id_back_image: File;
+}
+
+/** Rezervdeki arsayı kapora tutarı ve kimlik fotoğraflarıyla "Kapora Alındı"ya taşır (boş arsada önce rezerv gerekir). */
+export const takeLandDeposit = async (id: number, deposit: LandDeposit): Promise<RepresentativeLand> => {
+  const formData = new FormData();
+  formData.append('deposit_amount', deposit.deposit_amount);
+  formData.append('id_front_image', deposit.id_front_image);
+  formData.append('id_back_image', deposit.id_back_image);
+  const { data } = await api.post(`representative/lands/${id}/deposit/`, formData);
   return data;
+};
+
+/** Arsaya yeni not ekler; mevcut notlar değişmez, yeni not tarih ve kullanıcı adıyla sona yazılır. */
+export const addRepresentativeLandNote = async (id: number, note: string): Promise<RepresentativeLand> => {
+  const { data } = await api.post(`representative/lands/${id}/notes/`, { note });
+  return data;
+};
+
+export type PresentationReportType = 'pptx' | 'pdf';
+
+/** Yönetici: seçili dönemin satış özetini PowerPoint ya da PDF olarak indirir. */
+export const downloadPresentationReport = async (
+  type: PresentationReportType,
+  range: { dateFrom?: string; dateTo?: string; periodLabel?: string },
+): Promise<{ blob: Blob; fileName: string }> => {
+  const params: Record<string, string> = { type };
+  if (range.dateFrom) params.date_from = range.dateFrom;
+  if (range.dateTo) params.date_to = range.dateTo;
+  if (range.periodLabel) params.period_label = range.periodLabel;
+  const response = await api.get<Blob>('reports/presentation/', { params, responseType: 'blob' });
+  const disposition = String(response.headers['content-disposition'] ?? '');
+  const fileName = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `satis-raporu.${type}`;
+  return { blob: response.data, fileName };
 };
 
 export const getViewerUsers = async (): Promise<ViewerUser[]> => {
@@ -124,6 +164,7 @@ export type LandUpdate = Partial<Pick<
   | 'reservation_notes'
   | 'deposit_amount'
   | 'sale_price'
+  | 'down_payment'
 >> & {
   status: LandStatus;
   installment_plan?: Land['installment_plan'];
@@ -143,7 +184,7 @@ export const getLandStatusUpdate = (status: LandStatus): LandUpdate =>
       }
     : { status };
 
-export type NewLand = Pick<Land, 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel'> & {
+export type NewLand = Pick<Land, 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel' | 'ownership_type' | 'hisse_no'> & {
   status: 'BOS';
   reservation_notes: string;
   deposit_amount: null;
@@ -154,19 +195,27 @@ export const createLand = async (land: NewLand): Promise<Land> => {
   return data;
 };
 
+export type LandStatusFiles = Partial<Record<'title_deed_image' | 'id_front_image' | 'id_back_image', File>>;
+
 export const updateLandStatus = async (
   id: number,
   update: LandUpdate,
-  titleDeedImage?: File,
+  files: LandStatusFiles = {},
 ): Promise<Land> => {
   let payload: LandUpdate | FormData = update;
-  if (titleDeedImage) {
+  const fileEntries = Object.entries(files).filter((entry): entry is [string, File] => entry[1] instanceof File);
+  if (fileEntries.length > 0) {
     const formData = new FormData();
     Object.entries(update).forEach(([key, value]) => {
-      if (value === undefined || value === null) return;
+      if (value === undefined) return;
+      // Form gönderiminde boş değer, sunucuda "boşalt" (null) olarak okunur.
+      if (value === null) {
+        formData.append(key, '');
+        return;
+      }
       formData.append(key, key === 'installment_plan' ? JSON.stringify(value) : String(value));
     });
-    formData.append('title_deed_image', titleDeedImage);
+    fileEntries.forEach(([key, file]) => formData.append(key, file));
     payload = formData;
   }
   const { data } = await api.patch(`lands/${id}/change-status/`, payload);

@@ -25,6 +25,8 @@ const FIELD_LABELS: Record<string, string> = {
   reservation_notes: 'Arsa notu',
   deposit_amount: 'Kapora tutarı',
   sales_representatives_can_view_reservation_details: 'Temsilci rezervasyon görünürlüğü',
+  representative_max_stage: 'Temsilcinin ilerletebileceği son aşama',
+  representatives_can_add_notes: 'Temsilci not ekleyebilir',
   disabled_codes: 'Kapalı bildirim kodları',
 };
 

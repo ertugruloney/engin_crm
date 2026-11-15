@@ -1,4 +1,6 @@
 import json
+import os
+from decimal import Decimal
 from io import BytesIO
 from tempfile import TemporaryDirectory
 
@@ -8,8 +10,23 @@ from rest_framework.test import APIClient, APITestCase
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
 from PIL import Image
-from .models import AuditLog, Customer, CustomerLandRecord, Land, Notification, NotificationSettings, RepresentativeSettings
-from .auth_views import VIEWER_GROUP
+from .models import AuditLog, Customer, CustomerLandRecord, Land, LandCenter, Notification, NotificationSettings, RepresentativeSettings
+from .auth_views import SALES_SUPPORT_GROUP, VIEWER_GROUP
+from .center_distances import center_identity
+
+# Kimlik fotoğrafları testlerde gerçek özel klasöre değil geçici bir klasöre yazılır.
+_PRIVATE_MEDIA_DIR = TemporaryDirectory()
+override_settings(PRIVATE_MEDIA_ROOT=_PRIVATE_MEDIA_DIR.name).enable()
+
+
+def png_upload(name='image.png'):
+    buffer = BytesIO()
+    Image.new('RGB', (1, 1), color='white').save(buffer, format='PNG')
+    return SimpleUploadedFile(name, buffer.getvalue(), content_type='image/png')
+
+
+def id_images():
+    return {'id_front_image': png_upload('kimlik-on.png'), 'id_back_image': png_upload('kimlik-arka.png')}
 
 
 class LandReservationTests(APITestCase):
@@ -72,9 +89,9 @@ class LandReservationTests(APITestCase):
 
     def test_each_status_transition_is_recorded_automatically(self):
         response = self.client.patch(
-            f'/api/lands/{self.land.id}/',
-            {'status': 'KAPORA_ALINDI', 'deposit_amount': '50000.00'},
-            format='json',
+            self.url,
+            {'status': 'KAPORA_ALINDI', 'deposit_amount': '50000.00', **id_images()},
+            format='multipart',
         )
 
         self.assertEqual(response.status_code, 200)
@@ -257,6 +274,75 @@ class LandReservationTests(APITestCase):
         self.assertEqual(len(self.land.installment_plan), 2)
         self.assertEqual(self.land.installment_plan[0]['due_date'], '2026-12-20')
 
+    def test_down_payment_is_deducted_before_installments(self):
+        self.land.status = 'TAPU'
+        self.land.deposit_amount = '200.00'
+        self.land.sale_price = '1000.00'
+        self.land.save()
+        plan = [{'due_date': '2026-12-20', 'amount': '250.00'}, {'due_date': '2027-01-20', 'amount': '250.00'}]
+
+        # 1000 - 200 kapora - 300 peşinat = 500 taksit
+        response = self.client.patch(self.url, {'status': 'TAPU', 'down_payment': '300.00', 'installment_plan': plan}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertEqual(str(self.land.down_payment), '300.00')
+
+        # Peşinat hesaba katılmadan bölünen plan reddedilir.
+        wrong = self.client.patch(self.url, {
+            'status': 'TAPU', 'down_payment': '300.00',
+            'installment_plan': [{'due_date': '2026-12-20', 'amount': '800.00'}],
+        }, format='json')
+        self.assertEqual(wrong.status_code, 400)
+        self.assertIn('installment_plan', wrong.data)
+
+    def test_title_deed_form_submission_saves_down_payment_and_empty_value_clears_it(self):
+        self.land.status = 'KAPORA_ALINDI'
+        self.land.deposit_amount = '200.00'
+        self.land.save()
+        plan = [{'due_date': '2026-12-20', 'amount': '250.00'}, {'due_date': '2027-01-20', 'amount': '250.00'}]
+        with TemporaryDirectory() as media_directory, override_settings(MEDIA_ROOT=media_directory):
+            response = self.client.patch(self.url, {
+                'status': 'TAPU', 'sale_price': '1000.00', 'down_payment': '300.00',
+                'installment_plan': json.dumps(plan), 'title_deed_image': png_upload('tapu.png'),
+            }, format='multipart')
+            self.assertEqual(response.status_code, 200, response.data)
+            self.land.refresh_from_db()
+            self.assertEqual(str(self.land.down_payment), '300.00')
+
+            # Peşinat silinip taksitler yeniden bölünürse boş değer peşinatı temizler.
+            response = self.client.patch(self.url, {
+                'status': 'TAPU', 'sale_price': '1000.00', 'down_payment': '',
+                'installment_plan': json.dumps([{'due_date': '2026-12-20', 'amount': '800.00'}]),
+                'title_deed_image': png_upload('tapu.png'),
+            }, format='multipart')
+            self.assertEqual(response.status_code, 200, response.data)
+            self.land.refresh_from_db()
+            self.assertIsNone(self.land.down_payment)
+
+    def test_down_payment_covering_whole_price_is_rejected(self):
+        self.land.status = 'TAPU'
+        self.land.deposit_amount = '200.00'
+        self.land.sale_price = '1000.00'
+        self.land.save()
+        response = self.client.patch(self.url, {
+            'status': 'TAPU', 'down_payment': '800.00',
+            'installment_plan': [{'due_date': '2026-12-20', 'amount': '1.00'}],
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('down_payment', response.data)
+
+    def test_cash_sale_clears_down_payment(self):
+        self.land.status = 'TAPU'
+        self.land.deposit_amount = '200.00'
+        self.land.sale_price = '1000.00'
+        self.land.down_payment = '300.00'
+        self.land.installment_plan = [{'due_date': '2026-12-20', 'amount': '500.00'}]
+        self.land.save()
+        response = self.client.patch(self.url, {'status': 'TAPU', 'installment_plan': []}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertIsNone(self.land.down_payment)
+
     def test_creating_land_records_its_initial_status_date(self):
         response = self.client.post('/api/lands/', {
             'il': 'Ankara',
@@ -312,7 +398,7 @@ class LandReservationTests(APITestCase):
         denied_response = self.client.get('/api/audit-logs/')
         self.assertEqual(denied_response.status_code, 403)
 
-    def test_land_history_is_scoped_to_land_and_redacts_private_fields_for_representatives(self):
+    def test_land_history_is_scoped_to_land_and_hidden_from_representatives(self):
         other_land = Land.objects.create(
             il='Ankara',
             ilce='Çankaya',
@@ -359,30 +445,23 @@ class LandReservationTests(APITestCase):
             },
         )
 
+        # Satış destek geçmişi görür ama iptal nedenleri yalnızca yöneticiye açıktır.
+        support = User.objects.create_user(username='support', password='Support-pass-12345')
+        support.groups.add(Group.objects.create(name=SALES_SUPPORT_GROUP))
+        self.client.force_authenticate(user=support)
+        support_response = self.client.get(f'/api/lands/{self.land.pk}/history/')
+        self.assertEqual(support_response.status_code, 200)
+        support_changes = support_response.data['results'][0]['changes']
+        self.assertNotIn('cancel_reason', support_changes)
+        self.assertNotIn('cancel_detail', support_changes)
+        self.assertNotIn('cancel_note', support_changes)
+        self.assertNotIn('cancel_reason', support_changes['deleted'])
+
+        # Satış temsilcisi işlem geçmişini hiç göremez.
         representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
         representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
         self.client.force_authenticate(user=representative)
-        representative_response = self.client.get(f'/api/lands/{self.land.pk}/history/')
-        representative_changes = representative_response.data['results'][0]['changes']
-
-        self.assertNotIn('cancel_reason', representative_changes)
-        self.assertNotIn('cancel_detail', representative_changes)
-        self.assertNotIn('cancel_note', representative_changes)
-        self.assertNotIn('cancel_reason', representative_changes['deleted'])
-
-        viewer = User.objects.create_user(username='sales', password='Sales-pass-12345')
-        viewer.groups.add(Group.objects.create(name=VIEWER_GROUP))
-        self.client.force_authenticate(user=viewer)
-        representative_response = self.client.get(f'/api/lands/{self.land.pk}/history/')
-
-        self.assertEqual(representative_response.status_code, 200)
-        self.assertEqual(
-            representative_response.data['results'][0]['changes'],
-            {
-                'status': {'old': 'BOS', 'new': 'REZERV'},
-                'deleted': {'status': 'TAPU'},
-            },
-        )
+        self.assertEqual(self.client.get(f'/api/lands/{self.land.pk}/history/').status_code, 403)
 
     def test_admin_login_and_logout_are_audited(self):
         client = APIClient(enforce_csrf_checks=True)
@@ -642,7 +721,8 @@ class LandReservationTests(APITestCase):
         self.assertNotIn('customer_name', reserve_response.data)
         self.assertNotIn('reservation_date', reserve_response.data)
         self.assertNotIn('customer_phone', reserve_response.data)
-        self.assertNotIn('reservation_notes', reserve_response.data)
+        # Arsa notları müşteri bilgisinden ayrı ayara bağlıdır (varsayılan: açık).
+        self.assertIn('reservation_notes', reserve_response.data)
         self.assertCountEqual(
             [land['id'] for land in list_response.data],
             sorted([self.land.id, deposit_land.id, title_land.id]),
@@ -694,20 +774,27 @@ class LandReservationTests(APITestCase):
         settings_response = self.client.get('/api/representative/settings/')
         lands_response = self.client.get('/api/representative/lands/')
         standard_lands_response = self.client.get('/api/lands/')
-        notes_response = self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Yetkisiz güncelleme'},
-            format='json',
-        )
-
         self.assertEqual(settings_response.status_code, 200)
         self.assertFalse(settings_response.data['can_view_reservation_details'])
+        self.assertTrue(settings_response.data['can_add_notes'])
         self.assertEqual(lands_response.status_code, 200)
         self.assertEqual(standard_lands_response.status_code, 200)
         for response in (lands_response, standard_lands_response):
             land_data = next(item for item in response.data if item['id'] == available_land.pk)
-            for field in ('reservation_date', 'customer_name', 'customer_phone', 'reservation_notes'):
+            for field in ('reservation_date', 'customer_name', 'customer_phone'):
                 self.assertNotIn(field, land_data)
+        # Notlar ayrı ayara bağlı ve varsayılan olarak açık: müşteri bilgisi gizliyken de görünür.
+        representative_land = next(item for item in lands_response.data if item['id'] == available_land.pk)
+        self.assertEqual(representative_land['reservation_notes'], 'Gizli boş arsa notu')
+
+        settings = RepresentativeSettings.objects.get(pk=1)
+        settings.representatives_can_add_notes = False
+        settings.save()
+        hidden_land = next(item for item in self.client.get('/api/representative/lands/').data if item['id'] == available_land.pk)
+        self.assertNotIn('reservation_notes', hidden_land)
+        notes_response = self.client.post(
+            f'/api/representative/lands/{self.land.id}/notes/', {'note': 'Yetkisiz not'}, format='json',
+        )
         self.assertEqual(notes_response.status_code, 403)
         self.land.refresh_from_db()
         self.assertEqual(self.land.reservation_notes, 'Gizli not')
@@ -728,10 +815,8 @@ class LandReservationTests(APITestCase):
 
         settings_response = self.client.get('/api/representative/settings/')
         lands_response = self.client.get('/api/representative/lands/')
-        notes_response = self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Güncel not'},
-            format='json',
+        notes_response = self.client.post(
+            f'/api/representative/lands/{self.land.id}/notes/', {'note': 'Güncel not'}, format='json',
         )
 
         self.assertTrue(settings_response.data['can_view_reservation_details'])
@@ -741,7 +826,8 @@ class LandReservationTests(APITestCase):
         self.assertEqual(land_data['reservation_date'], '2026-10-01')
         self.assertEqual(land_data['reservation_notes'], 'Görünür not')
         self.assertEqual(notes_response.status_code, 200)
-        self.assertEqual(notes_response.data['reservation_notes'], 'Güncel not')
+        self.assertTrue(notes_response.data['reservation_notes'].startswith('Görünür not\n\n['))
+        self.assertTrue(notes_response.data['reservation_notes'].endswith('· visible-sales] Güncel not'))
 
     def test_sales_representative_cannot_reserve_with_invalid_dates_or_change_other_stages(self):
         viewer = User.objects.create_user(username='sales', password='Sales-pass-12345')
@@ -776,43 +862,29 @@ class LandReservationTests(APITestCase):
             403,
         )
 
-    def test_sales_representative_can_update_notes_for_lands_at_any_stage(self):
-        settings = RepresentativeSettings.objects.get(pk=1)
-        settings.sales_representatives_can_view_reservation_details = True
-        settings.save()
+    def test_sales_representative_can_add_notes_at_any_stage_without_changing_existing_ones(self):
         viewer = User.objects.create_user(username='notes-sales', password='Sales-notes-pass-123')
         viewer.groups.add(Group.objects.create(name=VIEWER_GROUP))
         self.client.force_authenticate(user=viewer)
-        self.land.reservation_notes = 'Eski not'
+        self.land.reservation_notes = 'Yönetici notu'
         self.land.save()
+        url = f'/api/representative/lands/{self.land.id}/notes/'
 
-        available_response = self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Yeni boş arsa notu'},
-            format='json',
-        )
-        self.assertEqual(available_response.status_code, 200)
-        self.assertEqual(available_response.data['reservation_notes'], 'Yeni boş arsa notu')
+        for status_value, note in (('BOS', 'Boş arsa notu'), ('REZERV', 'Rezervli arsa notu'), ('TAPU', 'Tapu notu')):
+            Land.objects.filter(pk=self.land.pk).update(status=status_value)
+            response = self.client.post(url, {'note': note}, format='json')
+            self.assertEqual(response.status_code, 200)
 
-        self.land.status = 'REZERV'
-        self.land.save()
-        reserved_response = self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Rezervli arsa notu'},
-            format='json',
-        )
-        self.assertEqual(reserved_response.status_code, 200)
-        self.assertEqual(reserved_response.data['reservation_notes'], 'Rezervli arsa notu')
+        self.land.refresh_from_db()
+        lines = self.land.reservation_notes.split('\n\n')
+        self.assertEqual(lines[0], 'Yönetici notu')
+        self.assertEqual(len(lines), 4)
+        self.assertRegex(lines[1], r'^\[\d{2}\.\d{2}\.\d{4} \d{2}:\d{2} · notes-sales\] Boş arsa notu$')
+        self.assertTrue(lines[3].endswith('Tapu notu'))
 
-        self.land.status = 'TAPU'
-        self.land.save()
-        title_notes_response = self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Tapu aşaması notu'},
-            format='json',
-        )
-        self.assertEqual(title_notes_response.status_code, 200)
-        self.assertEqual(title_notes_response.data['reservation_notes'], 'Tapu aşaması notu')
+        # Eski "notu değiştir" isteği artık yok; boş not reddedilir.
+        self.assertEqual(self.client.patch(url, {'reservation_notes': 'Sil'}, format='json').status_code, 405)
+        self.assertEqual(self.client.post(url, {'note': '   '}, format='json').status_code, 400)
 
 
 class NotificationTests(APITestCase):
@@ -871,10 +943,8 @@ class NotificationTests(APITestCase):
         settings.save()
 
         self.client.force_authenticate(user=self.viewer)
-        self.client.patch(
-            f'/api/representative/lands/{self.land.id}/notes/',
-            {'reservation_notes': 'Yeni not'},
-            format='json',
+        self.client.post(
+            f'/api/representative/lands/{self.land.id}/notes/', {'note': 'Yeni not'}, format='json',
         )
 
         self.client.force_authenticate(user=self.admin)
@@ -1375,11 +1445,12 @@ class CustomerTests(APITestCase):
 
     def test_title_deed_marks_purchase_and_totals_it(self):
         self.reserve(self.land)
-        self.client.patch(
+        deposit = self.client.patch(
             f'/api/lands/{self.land.id}/change-status/',
-            {'status': 'KAPORA_ALINDI', 'deposit_amount': '100000.00'},
-            format='json',
+            {'status': 'KAPORA_ALINDI', 'deposit_amount': '100000.00', **id_images()},
+            format='multipart',
         )
+        self.assertEqual(deposit.status_code, 200)
         image_buffer = BytesIO()
         Image.new('RGB', (1, 1), color='white').save(image_buffer, format='PNG')
         image = SimpleUploadedFile('tapu.png', image_buffer.getvalue(), content_type='image/png')
@@ -1526,6 +1597,53 @@ class LandLocationTests(APITestCase):
         self.assertIn('parcel_query_url', lands[0])
         self.assertEqual(self.client.patch(self.url, {'latitude': '40.0', 'longitude': '33.0'}, format='json').status_code, 403)
 
+    def test_land_cards_include_straight_line_distance_to_cached_centers(self):
+        self.land.latitude = '39.791234'
+        self.land.longitude = '32.805678'
+        self.land.save()
+        centers = (
+            ('city', 'Ankara', '', '', '39.791234', '32.815678', 'city_center_distance_km'),
+            ('district', 'Ankara', 'Gölbaşı', '', '39.801234', '32.805678', 'district_center_distance_km'),
+            ('neighborhood', 'Ankara', 'Gölbaşı', 'Merkez', '39.791234', '32.805678', 'neighborhood_center_distance_km'),
+        )
+        for level, il, ilce, mahalle, latitude, longitude, _ in centers:
+            LandCenter.objects.create(
+                cache_key=center_identity(level, il, ilce, mahalle),
+                level=level,
+                query=f'{il} {ilce} {mahalle}',
+                latitude=latitude,
+                longitude=longitude,
+            )
+
+        response = self.client.get('/api/lands/')
+
+        self.assertEqual(response.status_code, 200)
+        land_data = response.data[0]
+        self.assertEqual(land_data['city_center_distance_km'], 0.9)
+        self.assertEqual(land_data['district_center_distance_km'], 1.1)
+        self.assertEqual(land_data['neighborhood_center_distance_km'], 0.0)
+
+    def test_representative_land_cards_include_cached_center_distances(self):
+        self.land.latitude = '39.791234'
+        self.land.longitude = '32.805678'
+        self.land.save()
+        LandCenter.objects.create(
+            cache_key=center_identity('city', 'Ankara'),
+            level='city',
+            query='Ankara, Türkiye',
+            latitude='39.791234',
+            longitude='32.815678',
+        )
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+
+        lands = self.client.get('/api/representative/lands/').data
+
+        self.assertEqual(lands[0]['city_center_distance_km'], 0.9)
+        self.assertIsNone(lands[0]['district_center_distance_km'])
+        self.assertIsNone(lands[0]['neighborhood_center_distance_km'])
+
 
 class ParcelLinkTests(APITestCase):
     LINK = 'https://parselsorgu.tkgm.gov.tr/#ara/idari/154321/10/1/1700000000000'
@@ -1649,3 +1767,326 @@ class TkgmSyncTests(APITestCase):
         representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
         self.client.force_authenticate(user=representative)
         self.assertEqual(self.sync().status_code, 403)
+
+
+class SharedParcelTests(APITestCase):
+    """Hisseli satılan parseller: aynı ada/parsel, Excel'den gelen hisse no ile ayrı arsalar olarak tutulur."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='a@example.com')
+        self.client.force_authenticate(user=self.admin)
+
+    def row(self, hisse_no=''):
+        return {
+            'il': 'Tekirdağ', 'ilce': 'Çorlu', 'mahalle': 'Esentepe', 'ada': '45', 'parsel': '7',
+            'ownership_type': 'HISSELI' if hisse_no else 'MUSTAKIL', 'hisse_no': hisse_no,
+        }
+
+    def test_share_number_without_type_marks_land_as_shared(self):
+        payload = self.row('1')
+        payload.pop('ownership_type')
+        response = self.client.post('/api/lands/', payload, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['ownership_type'], 'HISSELI')
+
+    def test_shared_land_requires_share_number_and_standalone_rejects_one(self):
+        shared = self.client.post('/api/lands/', {**self.row(''), 'ownership_type': 'HISSELI'}, format='json')
+        self.assertEqual(shared.status_code, 400)
+        self.assertIn('hisse_no', shared.data)
+        standalone = self.client.post('/api/lands/', {**self.row('2'), 'ownership_type': 'MUSTAKIL'}, format='json')
+        self.assertEqual(standalone.status_code, 400)
+        self.assertIn('hisse_no', standalone.data)
+        self.assertEqual(self.client.post('/api/lands/', self.row(''), format='json').status_code, 201)
+
+    def test_bulk_create_rejects_parcel_entered_as_both_types(self):
+        Land.objects.create(**self.row(''))
+        response = self.client.post('/api/lands/bulk-create/', [self.row('1')], format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['duplicate_rows'], [2])
+        self.assertIn('müstakil', response.data['detail'])
+
+    def test_bulk_create_accepts_same_parcel_with_different_share_numbers(self):
+        response = self.client.post(
+            '/api/lands/bulk-create/', [self.row(str(number)) for number in range(1, 11)], format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            sorted(Land.objects.values_list('hisse_no', flat=True), key=int),
+            [str(number) for number in range(1, 11)],
+        )
+
+    def test_bulk_create_rejects_repeated_share_number(self):
+        Land.objects.create(**self.row('3'))
+        response = self.client.post('/api/lands/bulk-create/', [self.row('4'), self.row(' 3 ')], format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['duplicate_rows'], [3])
+
+    def test_share_number_appears_in_customer_record_label(self):
+        land = Land.objects.create(**self.row('2/10'))
+        self.client.patch(f'/api/lands/{land.id}/change-status/', {
+            'status': 'REZERV', 'customer_name': 'Ali Veli', 'customer_phone': '05321112233',
+        }, format='json')
+        record = CustomerLandRecord.objects.get(land=land)
+        self.assertEqual(record.land_label, 'Tekirdağ, Çorlu, Esentepe, Ada 45 / Parsel 7 · Hisse 2/10')
+
+
+class RepresentativeDepositTests(APITestCase):
+    def setUp(self):
+        group = Group.objects.create(name=VIEWER_GROUP)
+        self.sales = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        self.sales.groups.add(group)
+        self.other_sales = User.objects.create_user(username='other', password='Other-pass-12345')
+        self.other_sales.groups.add(group)
+        self.land = Land.objects.create(il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='101', parsel='2', hisse_no='5')
+        self.client.force_authenticate(user=self.sales)
+        self.url = f'/api/representative/lands/{self.land.id}/deposit/'
+
+    def reserve(self):
+        response = self.client.post(
+            f'/api/representative/lands/{self.land.id}/reserve/',
+            {'customer_name': 'Ayşe Yılmaz', 'customer_phone': '05551234567'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def admin_user(self):
+        return User.objects.create_superuser(username='boss', password='admin-pass-123', email='b@example.com')
+
+    def test_available_land_cannot_skip_reservation(self):
+        self.assertFalse(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+        response = self.client.post(self.url, {'deposit_amount': '25000', **id_images()}, format='multipart')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('rezerve', response.data['detail'])
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'BOS')
+        self.assertFalse(self.land.status_history.exists())
+
+    def test_reserved_land_goes_to_deposit_stage_with_amount(self):
+        self.reserve()
+        response = self.client.post(self.url, {'deposit_amount': '25000', **id_images()}, format='multipart')
+
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'KAPORA_ALINDI')
+        self.assertEqual(str(self.land.deposit_amount), '25000.00')
+        self.assertEqual(list(self.land.status_history.values_list('status', flat=True)), ['REZERV', 'KAPORA_ALINDI'])
+        record = CustomerLandRecord.objects.get(land=self.land)
+        self.assertEqual((record.highest_status, record.representative), ('KAPORA_ALINDI', self.sales))
+        self.assertTrue(Notification.objects.filter(code='land.deposit_taken').exists())
+
+        self.client.force_authenticate(user=self.admin_user())
+        leaderboard = self.client.get('/api/dashboard/sales-leaderboard/').data['results']
+        self.assertEqual([(row['username'], row['deposits']) for row in leaderboard], [('sales', 1)])
+
+    def test_deposit_amount_is_required_and_positive(self):
+        self.reserve()
+        for amount in (None, '0', '-5'):
+            payload = id_images() if amount is None else {'deposit_amount': amount, **id_images()}
+            response = self.client.post(self.url, payload, format='multipart')
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('deposit_amount', response.data)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'REZERV')
+
+    def test_any_representative_can_take_deposit_on_reserved_land(self):
+        self.reserve()
+        self.assertTrue(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+
+        # Rezervi başka bir temsilci yapmış olsa da kapora alınabilir; satış tablosunda rezervi yapana yazılır.
+        self.client.force_authenticate(user=self.other_sales)
+        self.assertTrue(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+        response = self.client.post(self.url, {'deposit_amount': '1000', **id_images()}, format='multipart')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'KAPORA_ALINDI')
+        self.assertFalse(response.data['can_take_deposit'])
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.customer_name, 'Ayşe Yılmaz')
+        self.assertEqual(CustomerLandRecord.objects.get(land=self.land).representative, self.sales)
+
+        self.client.force_authenticate(user=self.admin_user())
+        leaderboard = self.client.get('/api/dashboard/sales-leaderboard/').data['results']
+        self.assertEqual([(row['username'], row['deposits']) for row in leaderboard], [('sales', 1)])
+
+    def test_land_reserved_by_admin_can_take_deposit(self):
+        admin_user = self.admin_user()
+        self.client.force_authenticate(user=admin_user)
+        self.client.patch(f'/api/lands/{self.land.id}/change-status/', {'status': 'REZERV', 'customer_name': 'Ali Veli'}, format='json')
+        self.client.force_authenticate(user=self.sales)
+        self.assertTrue(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+        response = self.client.post(self.url, {'deposit_amount': '1000', **id_images()}, format='multipart')
+        self.assertEqual(response.status_code, 200)
+
+    def test_land_past_deposit_stage_is_rejected(self):
+        self.land.status = 'TAPU'
+        self.land.save()
+        self.assertEqual(
+            self.client.post(self.url, {'deposit_amount': '1000', **id_images()}, format='multipart').status_code, 400,
+        )
+
+
+class IdImageTests(APITestCase):
+    """Kapora aşamasında kimlik ön/arka fotoğrafı zorunludur; dosyalar herkese açık değildir."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='a@example.com')
+        self.client.force_authenticate(user=self.admin)
+        self.land = Land.objects.create(
+            il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='101', parsel='2',
+            status='REZERV', customer_name='Ayşe Yılmaz',
+        )
+        self.url = f'/api/lands/{self.land.id}/change-status/'
+
+    def take_deposit(self, **images):
+        return self.client.patch(self.url, {'status': 'KAPORA_ALINDI', 'deposit_amount': '1000', **images}, format='multipart')
+
+    def test_deposit_stage_requires_both_id_images(self):
+        response = self.take_deposit()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('id_front_image', response.data)
+        self.assertIn('id_back_image', response.data)
+
+        only_front = self.take_deposit(id_front_image=png_upload())
+        self.assertEqual(only_front.status_code, 400)
+        self.assertIn('id_back_image', only_front.data)
+        self.assertEqual(Land.objects.get(pk=self.land.pk).status, 'REZERV')
+
+    def test_images_are_private_and_only_admin_or_support_can_download(self):
+        response = self.take_deposit(**id_images())
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        # Dosya herkese açık /media/ altında değil, özel klasörde ve rastgele adla.
+        self.assertTrue(self.land.id_front_image.path.startswith(_PRIVATE_MEDIA_DIR.name))
+        self.assertNotIn('kimlik', self.land.id_front_image.name)
+        self.assertTrue(response.data['id_front_image'].endswith(f'/api/lands/{self.land.id}/id-images/front/'))
+
+        download = self.client.get(f'/api/lands/{self.land.id}/id-images/back/')
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download['Content-Type'], 'image/png')
+        self.assertIn('no-store', download['Cache-Control'])
+
+        support = User.objects.create_user(username='support', password='Support-pass-12345')
+        support.groups.add(Group.objects.create(name=SALES_SUPPORT_GROUP))
+        self.client.force_authenticate(user=support)
+        self.assertEqual(self.client.get(f'/api/lands/{self.land.id}/id-images/front/').status_code, 200)
+
+        representative = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        representative.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.client.force_authenticate(user=representative)
+        self.assertEqual(self.client.get(f'/api/lands/{self.land.id}/id-images/front/').status_code, 403)
+        self.assertNotIn('id_front_image', self.client.get('/api/representative/lands/').data[0])
+
+    def test_releasing_land_deletes_id_images(self):
+        self.take_deposit(**id_images())
+        self.land.refresh_from_db()
+        paths = [self.land.id_front_image.path, self.land.id_back_image.path]
+        self.assertTrue(all(os.path.exists(path) for path in paths))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.patch(
+                self.url, {'status': 'BOS', 'cancel_reason': 'diger', 'cancel_note': 'Vazgeçti'}, format='json',
+            )
+        self.assertEqual(response.status_code, 200)
+        self.land.refresh_from_db()
+        self.assertFalse(self.land.id_front_image)
+        self.assertFalse(any(os.path.exists(path) for path in paths))
+
+
+class RepresentativeMaxStageTests(APITestCase):
+    """Satış temsilcisinin ilerletebileceği son aşama Django yönetim panelindeki ayardan gelir."""
+
+    def setUp(self):
+        self.sales = User.objects.create_user(username='sales', password='Sales-pass-12345')
+        self.sales.groups.add(Group.objects.create(name=VIEWER_GROUP))
+        self.land = Land.objects.create(il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='1')
+        self.client.force_authenticate(user=self.sales)
+        self.client.post(f'/api/representative/lands/{self.land.id}/reserve/', {'customer_name': 'Ali Veli'}, format='json')
+        self.deposit_url = f'/api/representative/lands/{self.land.id}/deposit/'
+
+    def set_max_stage(self, stage):
+        settings, _ = RepresentativeSettings.objects.get_or_create(pk=1)
+        settings.representative_max_stage = stage
+        settings.save()
+
+    def test_default_allows_deposit(self):
+        self.assertEqual(self.client.get('/api/representative/settings/').data['max_stage'], 'KAPORA_ALINDI')
+        self.assertTrue(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+        response = self.client.post(self.deposit_url, {'deposit_amount': '500', **id_images()}, format='multipart')
+        self.assertEqual(response.status_code, 200)
+
+    def test_reservation_only_setting_blocks_deposit_but_not_reservation(self):
+        self.set_max_stage('REZERV')
+        self.assertEqual(self.client.get('/api/representative/settings/').data['max_stage'], 'REZERV')
+        self.assertFalse(self.client.get('/api/representative/lands/').data[0]['can_take_deposit'])
+        response = self.client.post(self.deposit_url, {'deposit_amount': '500', **id_images()}, format='multipart')
+        self.assertEqual(response.status_code, 403)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'REZERV')
+
+        other = Land.objects.create(il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='2')
+        reserve = self.client.post(f'/api/representative/lands/{other.id}/reserve/', {'customer_name': 'Ayşe'}, format='json')
+        self.assertEqual(reserve.status_code, 200)
+
+    def test_admin_change_is_audited(self):
+        admin_user = User.objects.create_superuser(username='admin', password='admin-pass-123', email='a@example.com')
+        self.client.force_login(admin_user)
+        RepresentativeSettings.objects.get_or_create(pk=1)
+        response = self.client.post('/admin/lands/representativesettings/1/change/', {
+            'representative_max_stage': 'REZERV',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(RepresentativeSettings.objects.get(pk=1).representative_max_stage, 'REZERV')
+        self.assertTrue(AuditLog.objects.filter(
+            action='settings.updated', changes__representative_max_stage__new='REZERV',
+        ).exists())
+
+
+class PresentationReportTests(APITestCase):
+    """Yönetici ana ekranındaki "Sunum raporu" butonunun indirdiği PowerPoint / PDF."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='admin', password='admin-pass-123', email='a@example.com')
+        self.client.force_authenticate(user=self.admin)
+        sold = Land.objects.create(
+            il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='1', status='TAPU', sale_price='1000000',
+        )
+        sold.status_history.create(status='REZERV')
+        sold.status_history.create(status='TAPU')
+        shared = Land.objects.create(
+            il='Muğla', ilce='Bodrum', mahalle='Merkez', ada='5', parsel='7', ownership_type='HISSELI', hisse_no='1',
+            status='TAPU', sale_price='250000',
+        )
+        shared.status_history.create(status='TAPU')
+        Land.objects.create(il='Muğla', ilce='Bodrum', mahalle='Merkez', ada='5', parsel='7', ownership_type='HISSELI', hisse_no='2')
+        self.url = '/api/reports/presentation/'
+
+    def test_summary_counts_sales_regions_and_shares(self):
+        from .report_summary import build_report_summary
+
+        summary = build_report_summary()
+        self.assertEqual(summary['totals']['sales'], 2)
+        self.assertEqual(summary['totals']['amount'], Decimal('1250000'))
+        self.assertEqual(summary['totals']['shared_sales'], 1)
+        self.assertEqual({row['name']: row['sales'] for row in summary['regions']}, {'Marmara': 1, 'Ege': 1})
+        self.assertEqual(summary['shared_parcel_count'], 1)
+        self.assertEqual(summary['shared_parcels'][0]['counts']['TAPU'], 1)
+        self.assertEqual(summary['shared_parcels'][0]['total'], 2)
+
+    def test_admin_downloads_pptx_and_pdf(self):
+        pptx = self.client.get(self.url, {'type': 'pptx', 'date_from': '2020-01-01', 'period_label': 'Bu Yıl'})
+        self.assertEqual(pptx.status_code, 200)
+        self.assertTrue(pptx.content.startswith(b'PK'))
+        self.assertIn('.pptx', pptx['Content-Disposition'])
+
+        pdf = self.client.get(self.url, {'type': 'pdf'})
+        self.assertEqual(pdf.status_code, 200)
+        self.assertTrue(pdf.content.startswith(b'%PDF'))
+        self.assertTrue(AuditLog.objects.filter(action='report.exported', changes__type='pdf').exists())
+
+    def test_invalid_requests_and_non_admins_are_rejected(self):
+        self.assertEqual(self.client.get(self.url, {'type': 'docx'}).status_code, 400)
+        self.assertEqual(self.client.get(self.url, {'type': 'pdf', 'date_from': '15.11.2026'}).status_code, 400)
+        for group_name in (VIEWER_GROUP, SALES_SUPPORT_GROUP):
+            user = User.objects.create_user(username=f'user-{group_name}', password='User-pass-12345')
+            user.groups.add(Group.objects.get_or_create(name=group_name)[0])
+            self.client.force_authenticate(user=user)
+            self.assertEqual(self.client.get(self.url, {'type': 'pdf'}).status_code, 403)

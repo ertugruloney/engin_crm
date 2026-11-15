@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import TurkeyMapModule from 'react-turkey-map';
+import PresentationReportButton from './PresentationReportButton';
 import { getAuditLogs, getCurrentUser, getLands, getSalesLeaderboard } from '../api';
 import type { AuditLogEntry } from '../api';
 import { ACTION_LABELS } from '../labels';
@@ -787,6 +788,11 @@ export default function DashboardPage() {
               setCustomRange(range);
               setPeriod('custom');
             }}
+          />
+          <PresentationReportButton
+            dateFrom={apiRange.dateFrom}
+            dateTo={apiRange.dateTo}
+            periodLabel={PERIOD_TABS.find(tab => tab.value === period)?.label ?? 'Seçili tarih aralığı'}
           />
         </div>
       </div>

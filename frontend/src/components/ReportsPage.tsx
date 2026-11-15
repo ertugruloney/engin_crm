@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, CalendarDays, ChevronRight, Download, Home, MapPin, Users } from 'lucide-react';
+import { ArrowLeft, CalendarDays, ChevronRight, Download, Home, Layers, MapPin, Users } from 'lucide-react';
 import * as xlsx from 'xlsx';
 import { getLands, getSalesLeaderboard, getViewerUsers } from '../api';
 import { REGIONS, UNKNOWN_REGION, getRegionLabel } from '../regions';
-import type { Land, LandStatus } from '../types';
+import { ownershipLabels, parcelLabel } from '../types';
+import type { Land, LandStatus, OwnershipType } from '../types';
 
 // Raporlar, teknik bilgisi olmayan bir yöneticinin de bir bakışta anlayacağı şekilde sade tutulur:
 // az sayı, büyük yazı, günlük dil; ayrıntıya kartlara tıklayarak inilir.
@@ -15,6 +16,13 @@ export type ReportTab = 'region' | 'personnel';
 type Preset = 'month' | 'quarter' | 'year' | 'all' | 'custom';
 type DateRange = { from: string | null; to: string | null };
 type StatusFilter = LandStatus | 'all';
+type OwnershipFilter = OwnershipType | 'all';
+
+// Adresteki ?tip= değeri: müstakil / hisseli.
+const OWNERSHIP_PARAMS: Partial<Record<string, OwnershipType>> = { mustakil: 'MUSTAKIL', hisseli: 'HISSELI' };
+const OWNERSHIP_PARAM_OF: Record<OwnershipType, string> = { MUSTAKIL: 'mustakil', HISSELI: 'hisseli' };
+const OWNERSHIP_ORDER: OwnershipType[] = ['MUSTAKIL', 'HISSELI'];
+const ownershipOf = (land: Land): OwnershipType => land.ownership_type ?? 'MUSTAKIL';
 
 const EMPTY_LANDS: Land[] = [];
 const REGION_ORDER = [...REGIONS.map(region => region.label), UNKNOWN_REGION];
@@ -82,8 +90,24 @@ const displayName = (username: string) =>
     .map(part => part.charAt(0).toLocaleUpperCase('tr-TR') + part.slice(1))
     .join(' ') || username;
 
-type Metrics = { lands: number; available: number; reservations: number; deposits: number; sales: number; amount: number };
-const emptyMetrics = (): Metrics => ({ lands: 0, available: 0, reservations: 0, deposits: 0, sales: 0, amount: 0 });
+type Metrics = {
+  lands: number;
+  available: number;
+  reservations: number;
+  deposits: number;
+  sales: number;
+  amount: number;
+  // Satışların hisseli olanları (müstakil = sales - sharedSales).
+  sharedSales: number;
+  sharedAmount: number;
+};
+const emptyMetrics = (): Metrics => ({
+  lands: 0, available: 0, reservations: 0, deposits: 0, sales: 0, amount: 0, sharedSales: 0, sharedAmount: 0,
+});
+
+// "6 müstakil · 4 hisse satıldı" gibi kırılım satırı; satış yoksa boş.
+const salesSplitText = (sales: number, sharedSales: number) =>
+  sales > 0 ? `${sales - sharedSales} müstakil · ${sharedSales} hisse satıldı` : '';
 
 // Her arsanın rapora giren olayları: rezervasyonlar, son kapora ve (hâlâ tapuluysa) son tapu.
 type LandEvents = {
@@ -121,6 +145,10 @@ const addToMetrics = (target: Metrics, item: LandEvents, inRange: (date: Date) =
   if (item.sale && inRange(item.sale.at)) {
     target.sales += 1;
     target.amount += item.sale.amount;
+    if (ownershipOf(item.land) === 'HISSELI') {
+      target.sharedSales += 1;
+      target.sharedAmount += item.sale.amount;
+    }
   }
 };
 
@@ -294,7 +322,7 @@ function LandList({
                     {row.land.il} / {row.land.ilce}
                   </p>
                   <p className="text-sm text-slate-500">
-                    {row.land.mahalle} · Ada {row.land.ada}, Parsel {row.land.parsel}
+                    {row.land.mahalle} · {parcelLabel(row.land)}
                   </p>
                 </div>
                 <StatusChip status={row.land.status} />
@@ -318,6 +346,193 @@ function LandList({
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+// Müstakil / hisseli seçimi; her iki rapordaki tüm rakamları süzer.
+function OwnershipPicker({ value, onChange }: { value: OwnershipFilter; onChange: (value: OwnershipFilter) => void }) {
+  const options: { value: OwnershipFilter; label: string }[] = [
+    { value: 'all', label: 'Hepsi' },
+    ...OWNERSHIP_ORDER.map(type => ({ value: type as OwnershipFilter, label: ownershipLabels[type] })),
+  ];
+  return (
+    <div className={`${CARD} flex flex-wrap items-center gap-3 p-4`}>
+      <span className="flex items-center gap-2 text-base font-semibold text-slate-700">
+        <Layers size={20} className="text-violet-600" />
+        Tapu tipi?
+      </span>
+      {options.map(option => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={`rounded-xl px-5 py-2.5 text-base font-medium transition-colors ${
+            value === option.value ? 'bg-violet-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const OWNERSHIP_STYLE: Record<OwnershipType, { dot: string; hint: string }> = {
+  MUSTAKIL: { dot: 'bg-sky-500', hint: 'Parselin tamamı tek müşteriye satılır' },
+  HISSELI: { dot: 'bg-violet-500', hint: 'Parsel paylara bölünür, her hisse ayrı satılır' },
+};
+
+// Seçili yer ve dönem için müstakil ve hisseli arsaların yan yana karşılaştırması.
+function OwnershipBreakdown({
+  metrics,
+  selected,
+  onSelect,
+}: {
+  metrics: Record<OwnershipType, Metrics>;
+  selected: OwnershipFilter;
+  onSelect: (value: OwnershipFilter) => void;
+}) {
+  const totalAmount = metrics.MUSTAKIL.amount + metrics.HISSELI.amount;
+  return (
+    <section>
+      <h2 className="mb-3 text-xl font-bold text-slate-800">Müstakil ve hisseli</h2>
+      <div className="grid gap-4 md:grid-cols-2">
+        {OWNERSHIP_ORDER.map(type => {
+          const item = metrics[type];
+          const share = totalAmount > 0 ? Math.round((item.amount / totalAmount) * 100) : 0;
+          const unit = type === 'HISSELI' ? 'hisse' : 'arsa';
+          return (
+            <button
+              key={type}
+              type="button"
+              aria-pressed={selected === type}
+              onClick={() => onSelect(selected === type ? 'all' : type)}
+              className={`${CARD} group p-5 text-left transition hover:-translate-y-0.5 hover:shadow-lg ${
+                selected === type ? 'ring-2 ring-violet-400' : 'hover:ring-violet-200'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className={`h-3 w-3 rounded-full ${OWNERSHIP_STYLE[type].dot}`} />
+                <p className="flex-1 text-lg font-semibold text-slate-800">{ownershipLabels[type]}</p>
+                <ChevronRight size={20} className="text-slate-300 group-hover:text-violet-500" />
+              </div>
+              <p className="mt-1 text-sm text-slate-400">{OWNERSHIP_STYLE[type].hint}</p>
+              <p className="mt-3 text-2xl font-bold text-slate-900" title={formatCurrency(item.amount)}>
+                {item.amount > 0 ? formatMoney(item.amount) : 'Satış yok'}
+                {item.amount > 0 && <span className="ml-2 text-base font-medium text-slate-400">gelirin %{share}'i</span>}
+              </p>
+              <dl className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                {[
+                  ['Satılan', item.sales],
+                  ['Kapora', item.deposits],
+                  ['Rezerve', item.reservations],
+                  ['Boşta', item.available],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-lg bg-slate-50 px-3 py-2">
+                    <dt className="text-slate-500">{label}</dt>
+                    <dd className="text-lg font-semibold text-slate-800">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-3 text-sm text-slate-500">Toplam {item.lands} {unit}</p>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// Bir hisseli parselin hisselerinin şu anki durumu.
+type SharedParcel = {
+  key: string;
+  place: string;
+  parcel: string;
+  total: number;
+  counts: Record<LandStatus, number>;
+  amount: number;
+  firstLandId: number;
+};
+
+const groupSharedParcels = (items: LandEvents[]): SharedParcel[] => {
+  const map = new Map<string, SharedParcel>();
+  for (const { land } of items) {
+    if (ownershipOf(land) !== 'HISSELI') continue;
+    const key = [land.il, land.ilce, land.mahalle, land.ada, land.parsel].join('|');
+    const parcel = map.get(key) ?? {
+      key,
+      place: `${land.il} / ${land.ilce} · ${land.mahalle}`,
+      parcel: `Ada ${land.ada} / Parsel ${land.parsel}`,
+      total: 0,
+      counts: { TAPU: 0, KAPORA_ALINDI: 0, REZERV: 0, BOS: 0 },
+      amount: 0,
+      firstLandId: land.id,
+    };
+    parcel.total += 1;
+    parcel.counts[land.status] += 1;
+    if (land.status === 'TAPU') parcel.amount += Number(land.sale_price ?? 0);
+    map.set(key, parcel);
+  }
+  return [...map.values()].sort(
+    (a, b) => b.counts.TAPU / b.total - a.counts.TAPU / a.total || b.amount - a.amount || a.place.localeCompare(b.place, 'tr'),
+  );
+};
+
+function SharedParcelList({ parcels, onOpen }: { parcels: SharedParcel[]; onOpen: (landId: number) => void }) {
+  return (
+    <section className={`${CARD} min-w-0 p-6`}>
+      <h2 className="text-xl font-bold text-slate-800">Hisseli parseller</h2>
+      <p className="mt-1 text-sm text-slate-500">
+        Her parselin kaç hissesinin satıldığı (şu anki durum). Hisselerine bakmak için parsele tıklayın.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        {STATUS_ORDER.map(status => (
+          <span key={status} className="flex items-center gap-1.5">
+            <span className={`h-2.5 w-2.5 rounded-full ${STATUS_INFO[status].dot}`} />
+            {STATUS_INFO[status].label}
+          </span>
+        ))}
+      </div>
+      <ul className="mt-4 divide-y divide-slate-100">
+        {parcels.map(parcel => (
+          <li key={parcel.key}>
+            <button
+              type="button"
+              onClick={() => onOpen(parcel.firstLandId)}
+              className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 rounded-xl px-3 py-4 text-left transition-colors hover:bg-violet-50/60"
+            >
+              <div className="min-w-[14rem] flex-1">
+                <p className="font-semibold text-slate-800">{parcel.parcel}</p>
+                <p className="text-sm text-slate-500">{parcel.place}</p>
+              </div>
+              <div className="w-full min-w-[12rem] flex-1 sm:w-auto">
+                <p className="mb-1 text-sm text-slate-600">
+                  <span className="font-semibold text-slate-900">{parcel.counts.TAPU}</span> / {parcel.total} hisse satıldı
+                </p>
+                <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-100">
+                  {STATUS_ORDER.map(status => (
+                    <div
+                      key={status}
+                      className={STATUS_INFO[status].dot}
+                      style={{ width: `${(parcel.counts[status] / parcel.total) * 100}%` }}
+                      title={`${STATUS_INFO[status].label}: ${parcel.counts[status]}`}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="w-32 text-right">
+                <p className="text-sm text-slate-400">Gelen para</p>
+                <p className="font-semibold text-slate-800" title={parcel.amount ? formatCurrency(parcel.amount) : undefined}>
+                  {parcel.amount ? formatMoney(parcel.amount) : '—'}
+                </p>
+              </div>
+              <ChevronRight size={20} className="shrink-0 text-slate-300" />
+            </button>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -360,6 +575,10 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
   const cityFilter = params.get('il') ?? '';
   const districtFilter = params.get('ilce') ?? '';
   const personFilter = params.get('kisi') ?? '';
+  const ownershipFilter: OwnershipFilter = OWNERSHIP_PARAMS[params.get('tip') ?? ''] ?? 'all';
+  const setOwnershipFilter = (value: OwnershipFilter) =>
+    updateParams({ tip: value === 'all' ? null : OWNERSHIP_PARAM_OF[value] });
+  const matchesOwnership = (land: Land) => ownershipFilter === 'all' || ownershipOf(land) === ownershipFilter;
   const [showCustomDates, setShowCustomDates] = useState(preset === 'custom');
 
   const openLand = (landId: number) =>
@@ -376,6 +595,10 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
 
   const lands = landsQuery.data ?? EMPTY_LANDS;
   const events = useMemo(() => lands.map(toLandEvents), [lands]);
+  const isShared = (landId: number) => {
+    const land = landById.get(landId);
+    return land ? ownershipOf(land) === 'HISSELI' : false;
+  };
   const landById = useMemo(() => new Map(lands.map(land => [land.id, land])), [lands]);
 
   const inRange = useMemo(() => {
@@ -387,7 +610,8 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
 
   // ---- Bölge raporu: Türkiye → bölge → il → ilçe ----
   const level: 'region' | 'il' | 'ilce' | 'land' = districtFilter ? 'land' : cityFilter ? 'ilce' : regionFilter ? 'il' : 'region';
-  const placeEvents = useMemo(
+  // Seçili yerdeki tüm arsalar (tapu tipinden bağımsız); kırılım kartları ve hisseli parseller bundan çıkar.
+  const placeAllEvents = useMemo(
     () =>
       events.filter(
         item =>
@@ -397,6 +621,16 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
       ),
     [events, regionFilter, cityFilter, districtFilter],
   );
+  const placeEvents = useMemo(
+    () => (ownershipFilter === 'all' ? placeAllEvents : placeAllEvents.filter(item => ownershipOf(item.land) === ownershipFilter)),
+    [placeAllEvents, ownershipFilter],
+  );
+  const ownershipBreakdown = useMemo(() => {
+    const result: Record<OwnershipType, Metrics> = { MUSTAKIL: emptyMetrics(), HISSELI: emptyMetrics() };
+    for (const item of placeAllEvents) addToMetrics(result[ownershipOf(item.land)], item, inRange);
+    return result;
+  }, [placeAllEvents, inRange]);
+  const sharedParcels = useMemo(() => groupSharedParcels(placeAllEvents), [placeAllEvents]);
   const placeTotals = useMemo(() => {
     const result = emptyMetrics();
     for (const item of placeEvents) addToMetrics(result, item, inRange);
@@ -431,18 +665,40 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
   );
 
   // ---- Kişi raporu ----
-  const people = useMemo(
-    () =>
-      (leaderboardQuery.data?.results ?? []).map(row => ({
+  const people = (leaderboardQuery.data?.results ?? [])
+    .map(row => {
+      const sharedSold = row.lands.filter(item => item.sold_at && isShared(item.land_id));
+      const base = {
         username: row.username,
         reservations: row.reservations,
         deposits: row.deposits,
         sales: row.sales,
         amount: Number(row.amount),
         lands: row.lands,
-      })),
-    [leaderboardQuery.data],
-  );
+        sharedSales: sharedSold.length,
+        sharedAmount: sharedSold.reduce((sum, item) => sum + Number(landById.get(item.land_id)?.sale_price ?? 0), 0),
+      };
+      if (ownershipFilter === 'all') return base;
+      // Tapu tipi seçiliyse rakamlar kişinin o tipteki arsalarından yeniden sayılır.
+      const typed = row.lands.filter(item => {
+        const land = landById.get(item.land_id);
+        return land !== undefined && matchesOwnership(land);
+      });
+      const sold = typed.filter(item => item.sold_at);
+      const amount = sold.reduce((sum, item) => sum + Number(landById.get(item.land_id)?.sale_price ?? 0), 0);
+      return {
+        ...base,
+        reservations: typed.filter(item => item.reserved_at).length,
+        deposits: typed.filter(item => item.deposit_at).length,
+        sales: sold.length,
+        amount,
+        lands: typed,
+        sharedSales: ownershipFilter === 'HISSELI' ? sold.length : 0,
+        sharedAmount: ownershipFilter === 'HISSELI' ? amount : 0,
+      };
+    })
+    .filter(row => ownershipFilter === 'all' || row.lands.length > 0)
+    .sort((a, b) => b.amount - a.amount || b.sales - a.sales || a.username.localeCompare(b.username));
   const peopleTotals = people.reduce(
     (sum, row) => ({
       reservations: sum.reservations + row.reservations,
@@ -463,6 +719,8 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
         sales: 0,
         amount: 0,
         lands: [],
+        sharedSales: 0,
+        sharedAmount: 0,
       }
     : null;
   const personRank = person ? people.findIndex(row => row.username === person.username) : -1;
@@ -486,6 +744,8 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
       ? `${range.from ? formatDate(parseLocalDate(range.from)) : 'Başlangıç'} – ${range.to ? formatDate(parseLocalDate(range.to)) : 'bugün'}`
       : PRESETS.find(item => item.value === preset)?.label ?? '';
   const fileSuffix = `${range.from ?? 'baslangic'}_${range.to ?? 'bugun'}`;
+  const typeSuffix = ownershipFilter === 'all' ? '' : `-${ownershipLabels[ownershipFilter]}`;
+  const typeText = ownershipFilter === 'all' ? '' : ` · ${ownershipLabels[ownershipFilter]}`;
 
   // Bölge yolu: Türkiye › Marmara › İstanbul › Başakşehir
   const crumbs = [
@@ -509,6 +769,8 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
       Mahalle: row.land.mahalle,
       Ada: row.land.ada,
       Parsel: row.land.parsel,
+      'Tapu Tipi': ownershipLabels[ownershipOf(row.land)],
+      'Hisse No': row.land.hisse_no || '',
       Durum: STATUS_INFO[row.land.status].label,
       Müşteri: row.land.customer_name,
       Tarih: formatDate(row.date),
@@ -524,7 +786,10 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
           rows: placeCards.map(([name, metrics]) => ({
             Yer: name,
             'Satılan Arsa': metrics.sales,
+            'Müstakil Satış': metrics.sales - metrics.sharedSales,
+            'Hisse Satışı': metrics.sharedSales,
             'Gelen Para (₺)': metrics.amount,
+            'Hisselerden Gelen (₺)': metrics.sharedAmount,
             'Kapora Alınan': metrics.deposits,
             'Rezerve Edilen': metrics.reservations,
             'Toplam Arsa': metrics.lands,
@@ -532,10 +797,37 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
           })),
         });
       }
+      sheets.push({
+        name: 'Tapu Tipi',
+        rows: OWNERSHIP_ORDER.map(type => ({
+          'Tapu Tipi': ownershipLabels[type],
+          'Satılan': ownershipBreakdown[type].sales,
+          'Gelen Para (₺)': ownershipBreakdown[type].amount,
+          'Kapora Alınan': ownershipBreakdown[type].deposits,
+          'Rezerve Edilen': ownershipBreakdown[type].reservations,
+          'Toplam': ownershipBreakdown[type].lands,
+          'Boşta Olan': ownershipBreakdown[type].available,
+        })),
+      });
+      if (sharedParcels.length > 0 && ownershipFilter !== 'MUSTAKIL') {
+        sheets.push({
+          name: 'Hisseli Parseller',
+          rows: sharedParcels.map(parcel => ({
+            Yer: parcel.place,
+            Parsel: parcel.parcel,
+            'Toplam Hisse': parcel.total,
+            'Satılan Hisse': parcel.counts.TAPU,
+            'Kapora Alınan': parcel.counts.KAPORA_ALINDI,
+            Rezerve: parcel.counts.REZERV,
+            Boşta: parcel.counts.BOS,
+            'Gelen Para (₺)': parcel.amount,
+          })),
+        });
+      }
       if (placeLandRows.length > 0) sheets.push({ name: 'Arsalar', rows: landRowsToExcel(placeLandRows) });
-      exportToExcel(sheets, `rapor-${crumbs.map(crumb => crumb.label).join('-')}-${fileSuffix}.xlsx`);
+      exportToExcel(sheets, `rapor-${crumbs.map(crumb => crumb.label).join('-')}${typeSuffix}-${fileSuffix}.xlsx`);
     } else if (person) {
-      exportToExcel([{ name: 'Arsalar', rows: landRowsToExcel(personLandRows) }], `rapor-${displayName(person.username)}-${fileSuffix}.xlsx`);
+      exportToExcel([{ name: 'Arsalar', rows: landRowsToExcel(personLandRows) }], `rapor-${displayName(person.username)}${typeSuffix}-${fileSuffix}.xlsx`);
     } else {
       exportToExcel(
         [
@@ -545,13 +837,15 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
               Sıra: index + 1,
               Kişi: displayName(row.username),
               'Satılan Arsa': row.sales,
+              'Müstakil Satış': row.sales - row.sharedSales,
+              'Hisse Satışı': row.sharedSales,
               'Gelen Para (₺)': row.amount,
               'Kapora Alınan': row.deposits,
               'Rezerve Edilen': row.reservations,
             })),
           },
         ],
-        `rapor-kisiler-${fileSuffix}.xlsx`,
+        `rapor-kisiler${typeSuffix}-${fileSuffix}.xlsx`,
       );
     }
   };
@@ -639,6 +933,8 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
         )}
       </div>
 
+      <OwnershipPicker value={ownershipFilter} onChange={setOwnershipFilter} />
+
       {tab === 'region' && (
         <>
           {/* Nerede olduğumuz: Türkiye › Marmara › İstanbul */}
@@ -671,8 +967,9 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
             })}
           </nav>
 
-          <Headline place={placeName} period={periodText} metrics={placeTotals} />
+          <Headline place={`${placeName}${typeText}`} period={periodText} metrics={placeTotals} />
           <NumberTiles metrics={placeTotals} />
+          <OwnershipBreakdown metrics={ownershipBreakdown} selected={ownershipFilter} onSelect={setOwnershipFilter} />
 
           {placeCards.length > 0 && (
             <section>
@@ -685,14 +982,20 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
                     amount={metrics.amount}
                     maxAmount={maxPlaceAmount}
                     lines={[
-                      `${metrics.sales} arsa satıldı`,
-                      `Toplam ${metrics.lands} arsa, ${metrics.available} tanesi boşta`,
+                      ownershipFilter === 'all' && metrics.sharedSales > 0
+                        ? salesSplitText(metrics.sales, metrics.sharedSales)
+                        : `${metrics.sales} ${ownershipFilter === 'HISSELI' ? 'hisse' : 'arsa'} satıldı`,
+                      `Toplam ${metrics.lands} ${ownershipFilter === 'HISSELI' ? 'hisse' : 'arsa'}, ${metrics.available} tanesi boşta`,
                     ]}
                     onClick={() => openPlace(name)}
                   />
                 ))}
               </div>
             </section>
+          )}
+
+          {ownershipFilter !== 'MUSTAKIL' && sharedParcels.length > 0 && (
+            <SharedParcelList parcels={sharedParcels} onOpen={openLand} />
           )}
 
           {cityFilter && (
@@ -709,7 +1012,7 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
 
       {tab === 'personnel' && !person && (
         <>
-          <Headline place="Tüm kişiler" period={periodText} metrics={peopleTotals} />
+          <Headline place={`Tüm kişiler${typeText}`} period={periodText} metrics={peopleTotals} />
           <NumberTiles metrics={peopleTotals} />
           <section>
             <h2 className="mb-3 text-xl font-bold text-slate-800">Kim ne kadar sattı?</h2>
@@ -734,7 +1037,12 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
                   }
                   amount={row.amount}
                   maxAmount={maxPersonAmount}
-                  lines={[`${row.sales} arsa sattı`, `${row.deposits} kapora aldı, ${row.reservations} arsa ayırttı`]}
+                  lines={[
+                    ownershipFilter === 'all' && row.sharedSales > 0
+                      ? `${row.sales} satış: ${row.sales - row.sharedSales} müstakil, ${row.sharedSales} hisse`
+                      : `${row.sales} ${ownershipFilter === 'HISSELI' ? 'hisse' : 'arsa'} sattı`,
+                    `${row.deposits} kapora aldı, ${row.reservations} arsa ayırttı`,
+                  ]}
                   onClick={() => updateParams({ kisi: row.username, durum: null })}
                 />
               ))}
@@ -775,7 +1083,7 @@ export default function ReportsPage({ tab }: { tab: ReportTab }) {
             </div>
           </div>
 
-          <Headline place={displayName(person.username)} period={periodText} metrics={person} />
+          <Headline place={`${displayName(person.username)}${typeText}`} period={periodText} metrics={person} />
           <NumberTiles metrics={person} />
           {person.reservations > 0 && (
             <p className={`${CARD} p-5 text-lg text-slate-700`}>

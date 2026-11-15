@@ -2,6 +2,8 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from .private_files import id_image_path, private_storage
+
 
 class Customer(models.Model):
     """Arsalardan bağımsız müşteri kartı; arsa boşa alınsa da müşteri ve geçmişi kalır."""
@@ -46,6 +48,15 @@ class Land(models.Model):
     mahalle = models.CharField(max_length=100)
     ada = models.CharField(max_length=100)
     parsel = models.CharField(max_length=100)
+    OWNERSHIP_CHOICES = [
+        ('MUSTAKIL', 'Müstakil'),
+        ('HISSELI', 'Hisseli'),
+    ]
+    # Müstakil: parselin tamamı tek satış. Hisseli: parsel paylara bölünüp her pay ayrı arsa kaydı olarak satılır.
+    ownership_type = models.CharField(max_length=10, choices=OWNERSHIP_CHOICES, default='MUSTAKIL', db_index=True)
+    # Hisseli arsada aynı ada/parseldeki payları ayırt eden numara (ör. "3" ya da "3/10"); Excel'den girilir,
+    # sistem otomatik numara vermez. Müstakil arsada her zaman boştur.
+    hisse_no = models.CharField(max_length=50, blank=True, default='')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='BOS')
     is_reserved = models.BooleanField(default=False)
     reservation_notes = models.TextField(blank=True, null=True)
@@ -62,8 +73,13 @@ class Land(models.Model):
     customer_phone = models.CharField(max_length=30, blank=True, default='')
     deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     sale_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    # Taksitli satışta kaporaya ek olarak peşin ödenen tutar; taksitler satış bedeli - kapora - peşinat üzerinden bölünür.
+    down_payment = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     installment_plan = models.JSONField(default=list, blank=True)
     title_deed_image = models.ImageField(upload_to='title_deed_images/', blank=True, null=True)
+    # Kapora aşamasında zorunlu müşteri kimlik fotoğrafları; herkese açık /media/ yerine özel klasörde saklanır.
+    id_front_image = models.ImageField(upload_to=id_image_path, storage=private_storage, blank=True, null=True)
+    id_back_image = models.ImageField(upload_to=id_image_path, storage=private_storage, blank=True, null=True)
     # Konum: satışçının müşteriye doğru yeri göstermesi için (isteğe bağlı).
     latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
@@ -78,7 +94,27 @@ class Land(models.Model):
     tkgm_synced_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
-        return f"{self.il} - {self.ilce} - Ada: {self.ada} Parsel: {self.parsel}"
+        share = f" Hisse: {self.hisse_no}" if self.hisse_no else ''
+        return f"{self.il} - {self.ilce} - Ada: {self.ada} Parsel: {self.parsel}{share}"
+
+
+class LandCenter(models.Model):
+    LEVEL_CHOICES = [
+        ('city', 'İl'),
+        ('district', 'İlçe'),
+        ('neighborhood', 'Mahalle'),
+    ]
+
+    cache_key = models.CharField(max_length=500, unique=True)
+    level = models.CharField(max_length=20, choices=LEVEL_CHOICES)
+    query = models.CharField(max_length=400)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    display_name = models.CharField(max_length=500, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.query
 
 
 # İptal nedenleri: (ana neden kodu, adı, alt nedenler). Alt nedeni olan ana nedende alt seçim zorunludur.
@@ -197,6 +233,23 @@ class RepresentativeSettings(models.Model):
         default=False,
         verbose_name='Satış temsilcileri rezervasyon detaylarını görebilsin',
         help_text='Kapalıyken müşteri bilgileri ve arsa notları satış temsilcilerine gösterilmez.',
+    )
+    representatives_can_add_notes = models.BooleanField(
+        default=True,
+        verbose_name='Satış temsilcileri arsa notlarını görebilsin ve not ekleyebilsin',
+        help_text='Temsilci mevcut notları değiştiremez/silemez; eklediği not tarih ve kullanıcı adıyla sona yazılır. '
+                  'Müşteri bilgileri yukarıdaki ayara bağlıdır.',
+    )
+    REPRESENTATIVE_STAGE_CHOICES = [
+        ('REZERV', 'Rezerv (yalnızca rezerve edebilir)'),
+        ('KAPORA_ALINDI', 'Kapora Alındı (kendi rezervini kaporaya geçirebilir)'),
+    ]
+    representative_max_stage = models.CharField(
+        max_length=20,
+        choices=REPRESENTATIVE_STAGE_CHOICES,
+        default='KAPORA_ALINDI',
+        verbose_name='Satış temsilcisinin ilerletebileceği en son aşama',
+        help_text='Tapu ve geri alma işlemleri her durumda yönetici ve satış destektedir.',
     )
 
     class Meta:

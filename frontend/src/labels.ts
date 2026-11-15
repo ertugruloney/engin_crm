@@ -12,6 +12,7 @@ export const ACTION_LABELS: Record<string, string> = {
   'user.created': 'Kullanıcı oluşturuldu',
   'notification_settings.updated': 'Bildirim ayarları güncellendi',
   'settings.updated': 'Temsilci ayarı güncellendi',
+  'report.exported': 'Sunum raporu indirildi',
 };
 
 export const TARGET_LABELS: Record<string, string> = {
@@ -22,4 +23,5 @@ export const TARGET_LABELS: Record<string, string> = {
   sales_support: 'Satış destek',
   representative_settings: 'Temsilci ayarları',
   notification_settings: 'Bildirim ayarları',
+  report: 'Rapor',
 };

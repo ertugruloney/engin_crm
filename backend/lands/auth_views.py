@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 from rest_framework import serializers
 from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.parsers import JSONParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import BasePermission, IsAdminUser
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
@@ -23,13 +23,15 @@ from rest_framework import status
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from .audit import record_admin_action, record_user_action
-from .customers import sync_land_customer
+from .customers import land_label, sync_land_customer
 from .models import AuditLog, Land
 from .models import RepresentativeSettings
 from .notifications import notify
+from .private_files import delete_stored_files
 from .serializers import (
+    LandDepositSerializer,
     LandReservationSerializer,
-    RepresentativeLandNotesSerializer,
+    RepresentativeNoteSerializer,
     RepresentativeLandSerializer,
 )
 
@@ -59,6 +61,14 @@ def user_role(user):
 class IsSalesRepresentative(BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and not request.user.is_staff and is_sales_representative(request.user)
+
+
+class IsAdminOrSalesSupport(BasePermission):
+    """Yönetici ve satış destek; satış temsilcileri hariç."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        return user.is_authenticated and (user.is_staff or is_sales_support(user))
 
 
 class IsAdminOrSalesRepresentative(BasePermission):
@@ -262,8 +272,9 @@ def audit_logs(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrSalesRepresentative])
+@permission_classes([IsAdminOrSalesSupport])
 def land_history(request, land_id):
+    """Arsanın işlem geçmişi; satış temsilcileri göremez."""
     land = get_object_or_404(Land, pk=land_id)
     queryset = AuditLog.objects.filter(
         target_type='land',
@@ -341,16 +352,30 @@ def audit_log_summary(request):
     return Response({'results': results})
 
 
-@api_view(['GET'])
-@permission_classes([IsAdminUser])
-def sales_leaderboard(request):
-    """Tapu'ya geçen satışları arsayı en son rezerve eden kullanıcıya bağlayarak temsilci bazlı satış tablosu döndürür."""
+def parse_date_range(request):
+    """?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD; hatalıysa ValueError."""
     date_from_raw = request.query_params.get('date_from', '').strip()
     date_to_raw = request.query_params.get('date_to', '').strip()
     date_from = parse_audit_date(date_from_raw) if date_from_raw else None
     date_to = parse_audit_date(date_to_raw) if date_to_raw else None
     if (date_from_raw and date_from is None) or (date_to_raw and date_to is None):
-        return Response({'detail': 'Geçersiz tarih formatı.'}, status=status.HTTP_400_BAD_REQUEST)
+        raise ValueError('Geçersiz tarih formatı.')
+    return date_from, date_to
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def sales_leaderboard(request):
+    """Tapu'ya geçen satışları arsayı en son rezerve eden kullanıcıya bağlayarak temsilci bazlı satış tablosu döndürür."""
+    try:
+        date_from, date_to = parse_date_range(request)
+    except ValueError as error:
+        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'results': build_sales_leaderboard(date_from, date_to)})
+
+
+def build_sales_leaderboard(date_from=None, date_to=None):
+    """Temsilci bazlı rezerv/kapora/satış sayıları ve satış tutarı (tarih aralığı dahil)."""
 
     def in_range(moment):
         day = timezone.localtime(moment).date()
@@ -410,7 +435,7 @@ def sales_leaderboard(request):
             key=lambda item: max(moment for moment in (item['reserved_at'], item['deposit_at'], item['sold_at']) if moment),
             reverse=True,
         )
-    return Response({'results': results})
+    return results
 
 
 @api_view(['GET'])
@@ -461,6 +486,25 @@ def audit_logs_calendar(request):
     return Response({'results': result})
 
 
+def representative_max_stage():
+    """Satış temsilcisinin ilerletebileceği en son aşama (Django yönetim panelinden değiştirilir)."""
+    return RepresentativeSettings.objects.filter(pk=1).values_list(
+        'representative_max_stage', flat=True,
+    ).first() or 'KAPORA_ALINDI'
+
+
+def representatives_can_take_deposit():
+    return representative_max_stage() == 'KAPORA_ALINDI'
+
+
+def representative_notes_allowed(user=None):
+    """Temsilci arsa notlarını görebilir ve not ekleyebilir mi (Django yönetim panelindeki ayar)."""
+    if user is not None and user_role(user) == 'sales_support':
+        return True
+    value = RepresentativeSettings.objects.filter(pk=1).values_list('representatives_can_add_notes', flat=True).first()
+    return True if value is None else value
+
+
 def representative_reservation_details_visible(user=None):
     if user is not None and user_role(user) == 'sales_support':
         return True
@@ -475,19 +519,72 @@ def representative_reservation_details_visible(user=None):
 def representative_settings(request):
     return Response({
         'can_view_reservation_details': representative_reservation_details_visible(request.user),
+        'max_stage': representative_max_stage(),
+        'can_add_notes': representative_notes_allowed(request.user),
     })
 
 
 @api_view(['GET'])
 @permission_classes([IsSalesRepresentative])
 def representative_lands(request):
-    lands = Land.objects.all().order_by('il', 'ilce', 'mahalle', 'ada', 'parsel')
+    lands = Land.objects.all().order_by('il', 'ilce', 'mahalle', 'ada', 'parsel', 'hisse_no')
     serializer = RepresentativeLandSerializer(
         lands,
         many=True,
-        context={'show_reservation_details': representative_reservation_details_visible(request.user)},
+        context={
+            'show_reservation_details': representative_reservation_details_visible(request.user),
+            'show_notes': representative_notes_allowed(request.user),
+            'request': request,
+        },
     )
     return Response(serializer.data)
+
+
+def _representative_land_response(request, land, status_code=status.HTTP_200_OK):
+    return Response(RepresentativeLandSerializer(
+        land,
+        context={
+            'show_reservation_details': representative_reservation_details_visible(request.user),
+            'show_notes': representative_notes_allowed(request.user),
+            'request': request,
+        },
+    ).data, status=status_code)
+
+
+def _reserve_for_representative(request, land, reservation_data):
+    """Boş arsayı temsilci adına rezerve eder (kayıt, denetim, bildirim). Kilitli bir arsa ile çağrılmalıdır."""
+    serializer = LandReservationSerializer(land, data=reservation_data)
+    serializer.is_valid(raise_exception=True)
+    land = serializer.save(status='REZERV')
+    land.status_history.create(status='REZERV')
+    sync_land_customer(land, actor=request.user)
+    label = land_label(land)
+    record_user_action(
+        request,
+        'land.status_changed',
+        'land',
+        land.pk,
+        {
+            'land_label': label,
+            'status': {'old': 'BOS', 'new': 'REZERV'},
+            'reservation_date': {'old': None, 'new': land.reservation_date.isoformat()},
+            'customer_name': {'old': '', 'new': land.customer_name},
+            'customer_phone': {'old': '', 'new': land.customer_phone},
+        },
+    )
+    notify(
+        'land.reserved',
+        actor=request.user,
+        related_user=request.user,
+        target_type='land',
+        target_id=land.pk,
+        context={
+            'land_label': label,
+            'customer_name': land.customer_name or 'belirtilmeyen müşteri',
+            'reservation_date': land.reservation_date.isoformat(),
+        },
+    )
+    return land
 
 
 @api_view(['POST'])
@@ -500,66 +597,110 @@ def reserve_land(request, land_id):
             pk=land_id,
             status='BOS',
         )
-        serializer = LandReservationSerializer(land, data=request.data)
-        serializer.is_valid(raise_exception=True)
-        land = serializer.save(status='REZERV')
-        land.status_history.create(status='REZERV')
+        land = _reserve_for_representative(request, land, request.data)
+    return _representative_land_response(request, land)
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
+@permission_classes([IsSalesRepresentative])
+def take_land_deposit(request, land_id):
+    """Temsilci kapora tutarı ve kimlik fotoğraflarıyla rezervdeki arsayı "Kapora Alındı" aşamasına taşır.
+
+    Rezervi kimin yaptığına bakılmaz (satış tablosunda kapora yine rezervi yapana yazılır).
+    Boş arsada kapora alınamaz; önce rezerv adımı tamamlanmalıdır.
+    """
+    if not representatives_can_take_deposit():
+        return Response(
+            {'detail': 'Satış temsilcileri şu an yalnızca rezerv yapabilir; kapora adımı yönetici ayarıyla kapalı.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    deposit_serializer = LandDepositSerializer(data=request.data)
+    deposit_serializer.is_valid(raise_exception=True)
+    deposit_amount = deposit_serializer.validated_data['deposit_amount']
+    id_front_image = deposit_serializer.validated_data['id_front_image']
+    id_back_image = deposit_serializer.validated_data['id_back_image']
+
+    with transaction.atomic():
+        land = get_object_or_404(Land.objects.select_for_update(), pk=land_id)
+        if land.status == 'BOS':
+            return Response(
+                {'detail': 'Kapora almadan önce arsayı rezerve etmelisiniz.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if land.status != 'REZERV':
+            return Response(
+                {'detail': 'Bu arsa kapora aşamasını geçmiş.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_id_images = [image.name for image in (land.id_front_image, land.id_back_image) if image]
+        land.status = 'KAPORA_ALINDI'
+        land.deposit_amount = deposit_amount
+        land.id_front_image = id_front_image
+        land.id_back_image = id_back_image
+        land.save(update_fields=['status', 'deposit_amount', 'id_front_image', 'id_back_image'])
+        transaction.on_commit(lambda: delete_stored_files(previous_id_images))
+        land.status_history.create(status='KAPORA_ALINDI')
         sync_land_customer(land, actor=request.user)
-        land_label = f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
+        label = land_label(land)
         record_user_action(
             request,
             'land.status_changed',
             'land',
             land.pk,
             {
-                'land_label': land_label,
-                'status': {'old': 'BOS', 'new': 'REZERV'},
-                'reservation_date': {'old': None, 'new': land.reservation_date.isoformat()},
-                'customer_name': {'old': '', 'new': land.customer_name},
-                'customer_phone': {'old': '', 'new': land.customer_phone},
+                'land_label': label,
+                'status': {'old': 'REZERV', 'new': 'KAPORA_ALINDI'},
+                'deposit_amount': {'old': None, 'new': str(deposit_amount)},
+                'id_images': {'old': None, 'new': 'Kimlik ön ve arka yüz fotoğrafı yüklendi'},
             },
         )
         notify(
-            'land.reserved',
+            'land.deposit_taken',
             actor=request.user,
             related_user=request.user,
             target_type='land',
             target_id=land.pk,
             context={
-                'land_label': land_label,
+                'land_label': label,
                 'customer_name': land.customer_name or 'belirtilmeyen müşteri',
-                'reservation_date': land.reservation_date.isoformat(),
+                'deposit_amount': f'{deposit_amount:,.2f} TL'.replace(',', 'X').replace('.', ',').replace('X', '.'),
             },
         )
-    return Response(RepresentativeLandSerializer(
-        land,
-        context={'show_reservation_details': representative_reservation_details_visible(request.user)},
-    ).data, status=status.HTTP_200_OK)
+    return _representative_land_response(request, land)
 
 
-@api_view(['PATCH'])
+@api_view(['POST'])
 @parser_classes([JSONParser])
 @permission_classes([IsSalesRepresentative])
-def update_representative_land_notes(request, land_id):
-    if not representative_reservation_details_visible(request.user):
+def add_representative_land_note(request, land_id):
+    """Temsilci arsaya not ekler; not tarih, saat ve kullanıcı adıyla mevcut notların sonuna yazılır."""
+    if not representative_notes_allowed(request.user):
         return Response(
             {'detail': 'Arsa notları yönetici ayarları nedeniyle satış temsilcilerine kapalıdır.'},
             status=status.HTTP_403_FORBIDDEN,
         )
-    land = get_object_or_404(Land, pk=land_id)
-    serializer = RepresentativeLandNotesSerializer(land, data=request.data, partial=True)
+    serializer = RepresentativeNoteSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    old_notes = land.reservation_notes
-    land = serializer.save()
-    if land.reservation_notes != old_notes:
-        land_label = f'{land.il}, {land.ilce}, {land.mahalle}, Ada {land.ada} / Parsel {land.parsel}'
+    note = serializer.validated_data['note']
+    with transaction.atomic():
+        land = get_object_or_404(Land.objects.select_for_update(), pk=land_id)
+        old_notes = land.reservation_notes or ''
+        from .report_summary import DISPLAY_TIME_ZONE
+
+        stamp = timezone.localtime(timezone=DISPLAY_TIME_ZONE).strftime('%d.%m.%Y %H:%M')
+        entry = f'[{stamp} · {request.user.get_username()}] {note}'
+        land.reservation_notes = f'{old_notes.rstrip()}\n\n{entry}' if old_notes.strip() else entry
+        land.save(update_fields=['reservation_notes'])
+        label = land_label(land)
         record_user_action(
             request,
             'land.updated',
             'land',
             land.pk,
             {
-                'land_label': land_label,
+                'land_label': label,
                 'reservation_notes': {'old': old_notes, 'new': land.reservation_notes},
             },
         )
@@ -569,9 +710,6 @@ def update_representative_land_notes(request, land_id):
             related_user=request.user,
             target_type='land',
             target_id=land.pk,
-            context={'land_label': land_label},
+            context={'land_label': label, 'note': note if len(note) <= 120 else f'{note[:117]}...'},
         )
-    return Response(RepresentativeLandSerializer(
-        land,
-        context={'show_reservation_details': representative_reservation_details_visible(request.user)},
-    ).data)
+    return _representative_land_response(request, land)

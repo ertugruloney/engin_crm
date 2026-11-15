@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { isAxiosError } from 'axios';
 import { Copy, ExternalLink, MapPin, Navigation, Pencil } from 'lucide-react';
 import { updateLandLocation } from '../api';
+import { parcelLabel } from '../types';
 import type { Land } from '../types';
 import {
   PARCEL_QUERY_HOME,
@@ -15,8 +16,9 @@ import {
 import TkgmParcelPanel from './TkgmParcelPanel';
 import WhatsAppButton from './WhatsAppButton';
 
-type LocatableLand = Pick<Land, 'id' | 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel'> &
-  Partial<Pick<Land, 'parcel_area' | 'parcel_quality' | 'parcel_locality' | 'parcel_sheet' | 'parcel_geometry' | 'tkgm_synced_at'>> & {
+type LocatableLand = Pick<Land, 'id' | 'il' | 'ilce' | 'mahalle' | 'ada' | 'parsel' | 'hisse_no'> &
+  Partial<Pick<Land, 'parcel_area' | 'parcel_quality' | 'parcel_locality' | 'parcel_sheet' | 'parcel_geometry' | 'tkgm_synced_at'>> &
+  Partial<Pick<Land, 'city_center_distance_km' | 'district_center_distance_km' | 'neighborhood_center_distance_km'>> & {
   latitude?: string | null;
   longitude?: string | null;
   parcel_query_url?: string;
@@ -24,6 +26,9 @@ type LocatableLand = Pick<Land, 'id' | 'il' | 'ilce' | 'mahalle' | 'ada' | 'pars
   customer_name?: string;
   customer_phone?: string;
 };
+
+const formatDistance = (distance: number | null | undefined) =>
+  distance == null ? '—' : `${distance.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} km`;
 
 const errorText = (error: unknown) => {
   if (isAxiosError<Record<string, unknown>>(error) && error.response?.data) {
@@ -48,7 +53,7 @@ export default function LandLocationCard({ land, canEdit }: { land: LocatableLan
   // Kayıtlı link yoksa aynı mahalleden öğrenilmiş kalıpla üretilen link kullanılır.
   const queryLink = land.parcel_query_url || land.parcel_query_url_auto || '';
   const isAutoLink = !land.parcel_query_url && Boolean(land.parcel_query_url_auto);
-  const parcelText = `${land.il} / ${land.ilce} / ${land.mahalle} · Ada ${land.ada} · Parsel ${land.parsel}`;
+  const parcelText = `${land.il} / ${land.ilce} / ${land.mahalle} · Ada ${land.ada} · Parsel ${land.parsel}${land.hisse_no ? ` · Hisse ${land.hisse_no}` : ''}`;
 
   const mutation = useMutation({
     mutationFn: () => {
@@ -92,7 +97,7 @@ export default function LandLocationCard({ land, canEdit }: { land: LocatableLan
   };
 
   const shareMessage = [
-    `Merhaba ${land.customer_name ?? ''}, ${land.il} / ${land.ilce} · ${land.mahalle}, Ada ${land.ada} / Parsel ${land.parsel} arsasının konumu:`,
+    `Merhaba ${land.customer_name ?? ''}, ${land.il} / ${land.ilce} · ${land.mahalle}, ${parcelLabel(land)} arsasının konumu:`,
     hasCoordinates ? mapsUrl(land.latitude!, land.longitude!) : '',
     queryLink ? `Tapu Kadastro parsel sorgu: ${queryLink}` : '',
   ]
@@ -111,6 +116,27 @@ export default function LandLocationCard({ land, canEdit }: { land: LocatableLan
             <Pencil size={14} /> {hasCoordinates || land.parcel_query_url ? 'Düzenle' : 'Konum ekle'}
           </button>
         )}
+      </div>
+
+      {/* Arsa koordinatından il, ilçe ve mahalle merkezlerine kuş uçuşu uzaklık. */}
+      <div aria-label="Kuş uçuşu merkez uzaklıkları" className="mb-4">
+        <dl className="grid grid-cols-3 gap-2">
+          {([
+            ['İl merkezi', land.city_center_distance_km],
+            ['İlçe merkezi', land.district_center_distance_km],
+            ['Mahalle merkezi', land.neighborhood_center_distance_km],
+          ] as const).map(([label, distance]) => (
+            <div key={label} className="rounded-lg bg-slate-50 px-2 py-2 text-center sm:px-3">
+              <dt className="text-[11px] text-slate-500 sm:text-xs">{label}</dt>
+              <dd className={`mt-0.5 text-sm font-semibold sm:text-base ${distance == null ? 'text-slate-300' : 'text-slate-800'}`}>
+                {formatDistance(distance)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-1.5 text-[11px] text-slate-400">
+          {hasCoordinates ? 'Kuş uçuşu uzaklık.' : 'Uzaklıklar, arsanın konumu girildiğinde hesaplanır.'}
+        </p>
       </div>
 
       {editing ? (
@@ -174,7 +200,7 @@ export default function LandLocationCard({ land, canEdit }: { land: LocatableLan
           {hasCoordinates ? (
             <>
               <iframe
-                title={`Ada ${land.ada} / Parsel ${land.parsel} harita konumu`}
+                title={`${parcelLabel(land)} harita konumu`}
                 src={embeddedMapUrl(land.latitude!, land.longitude!)}
                 loading="lazy"
                 className="h-44 w-full rounded-lg border border-slate-200"

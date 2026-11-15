@@ -4,11 +4,13 @@ import { isAxiosError } from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { X, MapPin, CheckCircle2, Circle, Pencil, UserRound, RotateCcw, ArrowLeft, ImagePlus, Download, History } from 'lucide-react';
-import { statusLabels } from '../types';
+import { ownershipLabels, statusLabels, parcelLabel } from '../types';
 import type { Land, LandInstallment, LandStatus } from '../types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { downloadTitleDeedImage, getLandStatusUpdate, updateLandStatus } from '../api';
-import type { CancelDetail, CancelReason, LandUpdate } from '../api';
+import type { CancelDetail, CancelReason, LandStatusFiles, LandUpdate } from '../api';
+import { EMPTY_ID_IMAGES, IdImageFields, StoredIdImages, idImagesError, idImagesPayload } from './IdImageFields';
+import type { IdImages } from './IdImageFields';
 import { CANCEL_REASON_TREE } from '../customerDisplay';
 import PhoneNumberInput from './PhoneNumberInput';
 import LandLocationCard from './LandLocationCard';
@@ -43,13 +45,17 @@ const getDefaultInstallmentDate = () => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-01`;
 };
 
+const toCents = (value: string | null | undefined) => Math.round(Number(value || 0) * 100);
+
+// Taksitlere bölünecek tutar: satış bedeli - kapora - peşinat (kuruş cinsinden).
+const installmentBalanceCents = (salePrice: string, depositAmount: string | null, downPayment: string) =>
+  toCents(salePrice) - toCents(depositAmount) - toCents(downPayment);
+
 const createInstallmentPlan = (
-  salePrice: string,
-  depositAmount: string | null,
+  totalCents: number,
   count: number,
   firstDate: string,
 ): LandInstallment[] => {
-  const totalCents = Math.round(Number(salePrice) * 100) - Math.round(Number(depositAmount || 0) * 100);
   if (!Number.isFinite(totalCents) || totalCents <= 0 || !Number.isInteger(count) || count < 1 || !firstDate) return [];
 
   const [year, month, day] = firstDate.split('-').map(Number);
@@ -130,7 +136,7 @@ function CancelLandDialog({
           <div>
             <h2 id="cancel-land-title" className="text-xl font-bold text-slate-900">Arsayı boşa al</h2>
             <p className="mt-1 text-sm text-slate-500">
-              Ada {land.ada} / Parsel {land.parsel}
+              {parcelLabel(land)}
               {hasCustomer && <> · <span className="font-medium text-slate-700">{land.customer_name}</span></>}
             </p>
           </div>
@@ -257,7 +263,11 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
   const [titleDeedImage, setTitleDeedImage] = useState<File | null>(null);
   const [titleDeedDownloadError, setTitleDeedDownloadError] = useState<string | null>(null);
   const [depositAmount, setDepositAmount] = useState(land?.deposit_amount || '');
+  const [idImages, setIdImages] = useState<IdImages>(EMPTY_ID_IMAGES);
+  const [idImagesSubmitAttempted, setIdImagesSubmitAttempted] = useState(false);
   const [salePrice, setSalePrice] = useState(land?.sale_price || '');
+  // Taksitli satışta kaporaya ek peşin ödeme; taksitler satış bedeli - kapora - peşinat üzerinden bölünür.
+  const [downPayment, setDownPayment] = useState(land?.down_payment || '');
   const [installmentEnabled, setInstallmentEnabled] = useState(Boolean(land?.installment_plan.length));
   const [installmentCount, setInstallmentCount] = useState(String(land?.installment_plan.length || 12));
   const [firstInstallmentDate, setFirstInstallmentDate] = useState(
@@ -276,14 +286,15 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
   }));
   
   const mutation = useMutation({
-    mutationFn: ({ id, update, image }: { id: number; update: LandUpdate; image?: File }) =>
-      updateLandStatus(id, update, image),
+    mutationFn: ({ id, update, files }: { id: number; update: LandUpdate; files?: LandStatusFiles }) =>
+      updateLandStatus(id, update, files),
     onSuccess: (updatedLand) => {
       queryClient.setQueryData<Land[]>(['lands'], old =>
         old?.map(item => item.id === updatedLand.id ? updatedLand : item)
       );
       setNotes(updatedLand.reservation_notes || '');
       setSalePrice(updatedLand.sale_price || '');
+      setDownPayment(updatedLand.down_payment || '');
       setInstallmentPlan(updatedLand.installment_plan || []);
       setInstallmentEnabled(Boolean(updatedLand.installment_plan?.length));
       queryClient.invalidateQueries({ queryKey: ['lands'] });
@@ -309,8 +320,8 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
   const isTitleDeedStage = land.status === 'TAPU';
   const isDepositStage = land.status === 'KAPORA_ALINDI';
   const isReservationFormRequired = land.status === 'BOS';
-  const remainingPriceCents =
-    Math.round(Number(salePrice) * 100) - Math.round(Number(land.deposit_amount || 0) * 100);
+  const downPaymentInvalid = downPayment !== '' && !(Number(downPayment) >= 0);
+  const remainingPriceCents = installmentBalanceCents(salePrice, land.deposit_amount, installmentEnabled ? downPayment : '');
   const installmentPlanIsBalanced =
     installmentEnabled
     && installmentPlan.length > 0
@@ -318,8 +329,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
     && sumInstallments(installmentPlan) === remainingPriceCents;
   const generateInstallments = () => {
     const generated = createInstallmentPlan(
-      salePrice,
-      land.deposit_amount,
+      remainingPriceCents,
       Number(installmentCount),
       firstInstallmentDate,
     );
@@ -341,6 +351,20 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
       </label>
       {installmentEnabled && (
         <>
+          <label className="block text-sm font-medium text-slate-700">
+            Peşinat (TL) <span className="font-normal text-slate-400">· kaporaya ek peşin ödeme, yoksa boş bırakın</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={downPayment}
+              onChange={event => setDownPayment(event.target.value)}
+              placeholder="0"
+              aria-invalid={downPaymentInvalid}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+            />
+          </label>
           <div className="grid grid-cols-2 gap-3">
             <label className="text-sm font-medium text-slate-700">
               Vade sayısı (ay)
@@ -366,14 +390,19 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
               />
             </label>
           </div>
-          <p className="text-xs text-slate-500">
-            Peşinat/kapora: {formatCurrency(String(Number(land.deposit_amount || 0)))}
-            {' · '}Taksitlere bölünecek: {remainingPriceCents > 0 ? formatCurrency(String(remainingPriceCents / 100)) : 'Satış bedeli ve peşinatı kontrol edin'}
-          </p>
+          <dl className="space-y-1 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <div className="flex justify-between gap-3"><dt>Satış bedeli</dt><dd>{formatCurrency(String(toCents(salePrice) / 100))}</dd></div>
+            <div className="flex justify-between gap-3"><dt>− Kapora</dt><dd>{formatCurrency(String(toCents(land.deposit_amount) / 100))}</dd></div>
+            <div className="flex justify-between gap-3"><dt>− Peşinat</dt><dd>{formatCurrency(String(toCents(downPayment) / 100))}</dd></div>
+            <div className={`flex justify-between gap-3 border-t border-slate-200 pt-1 font-semibold ${remainingPriceCents > 0 ? 'text-slate-800' : 'text-red-600'}`}>
+              <dt>Taksitlere bölünecek</dt>
+              <dd>{remainingPriceCents > 0 ? formatCurrency(String(remainingPriceCents / 100)) : 'Kapora + peşinat satış bedelinden küçük olmalı'}</dd>
+            </div>
+          </dl>
           <button
             type="button"
             onClick={generateInstallments}
-            disabled={!salePrice || Number(salePrice) <= 0 || !installmentCount || Number(installmentCount) < 1 || Number(installmentCount) > 360 || remainingPriceCents <= 0 || !firstInstallmentDate}
+            disabled={!salePrice || Number(salePrice) <= 0 || downPaymentInvalid || !installmentCount || Number(installmentCount) < 1 || Number(installmentCount) > 360 || remainingPriceCents <= 0 || !firstInstallmentDate}
             className="w-full rounded-lg border border-blue-200 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {installmentPlan.length ? 'Taksitleri yeniden hesapla' : 'Taksit planı oluştur'}
@@ -414,7 +443,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                 Taksit toplamı: {formatCurrency(String(sumInstallments(installmentPlan) / 100))}
                 {installmentPlanIsBalanced
                   ? ' · Kalan satış bedeliyle eşleşiyor'
-                  : ' · Taksitlerin toplamı peşinat sonrası kalan tutara eşit olmalı'}
+                  : ' · Toplam, kapora ve peşinat düşülmüş tutara eşit olmalı; "Taksitleri yeniden hesapla"ya basın'}
               </p>
             </div>
           )}
@@ -438,15 +467,22 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
       },
     });
   };
+  // Rezervden kapora aşamasına ilk geçişte kimlik ön/arka fotoğrafı zorunludur; sonradan düzenlerken isteğe bağlıdır.
+  const idImagesRequired = land.status === 'BOS' || land.status === 'REZERV';
   const openDepositForm = () => {
     setDepositAmount(land.deposit_amount || '');
+    setIdImages(EMPTY_ID_IMAGES);
+    setIdImagesSubmitAttempted(false);
     setShowDepositForm(true);
   };
   const saveDeposit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setIdImagesSubmitAttempted(true);
+    if (idImagesError(idImages, idImagesRequired)) return;
     mutation.mutate({
       id: land.id,
       update: { status: 'KAPORA_ALINDI', deposit_amount: depositAmount },
+      files: idImagesPayload(idImages),
     }, {
       onSuccess: () => setShowDepositForm(false),
     });
@@ -466,8 +502,9 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
           status: 'TAPU',
           sale_price: salePrice,
           installment_plan: installmentEnabled ? installmentPlan : [],
+          down_payment: installmentEnabled && downPayment !== '' ? downPayment : null,
         },
-        image: titleDeedImage,
+        files: { title_deed_image: titleDeedImage },
       },
       {
         onSuccess: () => {
@@ -489,6 +526,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
           status: land.status,
           sale_price: salePrice,
           installment_plan: installmentEnabled ? installmentPlan : [],
+          down_payment: installmentEnabled && downPayment !== '' ? downPayment : null,
         },
       },
       { onSuccess: () => setShowSalePriceForm(false) },
@@ -552,7 +590,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
         >
           <div className="flex items-center justify-between gap-3 border-b border-slate-100 p-4 sm:p-6">
             <div>
-              <h2 className="text-2xl font-bold text-slate-800">Ada {land.ada} / Parsel {land.parsel}</h2>
+              <h2 className="text-2xl font-bold text-slate-800">{parcelLabel(land)}</h2>
               <div className="flex items-center text-slate-500 text-sm mt-1">
                 <MapPin size={14} className="mr-1" />
                 {land.il}, {land.ilce}, {land.mahalle}
@@ -644,6 +682,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                                   } else {
                                     setTitleDeedImage(null);
                                     setSalePrice(land.sale_price || '');
+                                    setDownPayment(land.down_payment || '');
                                     setInstallmentPlan(land.installment_plan || []);
                                     setInstallmentEnabled(Boolean(land.installment_plan?.length));
                                     setInstallmentCount(String(land.installment_plan?.length || 12));
@@ -775,9 +814,16 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                           className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-700"
                         />
                       </label>
+                      <IdImageFields
+                        value={idImages}
+                        onChange={setIdImages}
+                        required={idImagesRequired}
+                        existing={{ front: Boolean(land.id_front_image), back: Boolean(land.id_back_image) }}
+                        showError={idImagesSubmitAttempted}
+                      />
                       {mutation.isError && (
                         <p role="alert" className="text-sm text-red-600">
-                          Kapora tutarı kaydedilemedi: {mutation.error.message}
+                          Kapora kaydedilemedi: {apiErrorText(mutation.error)}
                         </p>
                       )}
                       <div className="flex gap-2">
@@ -797,13 +843,10 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                         </button>
                       </div>
                     </form>
-                  ) : land.status === 'KAPORA_ALINDI' && land.deposit_amount ? (
-                    <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-                      <p className="text-2xl font-semibold text-slate-800">{formatCurrency(land.deposit_amount)}</p>
-                    </div>
                   ) : land.deposit_amount ? (
-                    <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <div className="space-y-4 rounded-xl border border-slate-100 bg-slate-50 p-4">
                       <p className="text-2xl font-semibold text-slate-800">{formatCurrency(land.deposit_amount)}</p>
+                      <StoredIdImages front={land.id_front_image} back={land.id_back_image} />
                     </div>
                   ) : (
                     <p role="alert" className="rounded-xl border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
@@ -934,6 +977,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                         type="button"
                         onClick={() => {
                           setSalePrice(land.sale_price || '');
+                          setDownPayment(land.down_payment || '');
                           setInstallmentPlan(land.installment_plan || []);
                           setInstallmentEnabled(Boolean(land.installment_plan?.length));
                           setInstallmentCount(String(land.installment_plan?.length || 12));
@@ -979,6 +1023,12 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                         <div className="mt-3 border-t border-blue-100 pt-3 text-sm">
                           <span className="block text-xs text-slate-500">Alınan kapora</span>
                           <span className="font-semibold text-slate-800">{formatCurrency(land.deposit_amount)}</span>
+                        </div>
+                      )}
+                      {land.down_payment && (
+                        <div className="mt-3 border-t border-blue-100 pt-3 text-sm">
+                          <span className="block text-xs text-slate-500">Peşinat</span>
+                          <span className="font-semibold text-slate-800">{formatCurrency(land.down_payment)}</span>
                         </div>
                       )}
                       {land.installment_plan?.length > 0 && (
@@ -1027,6 +1077,9 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                         <dt className="text-slate-500">Mahalle</dt><dd className="text-right font-medium text-slate-800">{land.mahalle}</dd>
                         <dt className="text-slate-500">Ada</dt><dd className="text-right font-medium text-slate-800">{land.ada}</dd>
                         <dt className="text-slate-500">Parsel</dt><dd className="text-right font-medium text-slate-800">{land.parsel}</dd>
+                        <dt className="text-slate-500">Tapu tipi</dt><dd className="text-right font-medium text-slate-800">{ownershipLabels[land.ownership_type ?? 'MUSTAKIL']}</dd>
+                        <dt className="text-slate-500">Tapu tipi</dt><dd className="text-right font-medium text-slate-800">{ownershipLabels[land.ownership_type ?? 'MUSTAKIL']}</dd>
+                      {land.hisse_no && <><dt className="text-slate-500">Hisse No</dt><dd className="text-right font-medium text-slate-800">{land.hisse_no}</dd></>}
                       </dl>
                     </section>
                   </>
@@ -1040,6 +1093,8 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                       <dt className="text-slate-500">İlçe</dt><dd className="text-right font-medium text-slate-800">{land.ilce}</dd>
                       <dt className="text-slate-500">Mahalle</dt><dd className="text-right font-medium text-slate-800">{land.mahalle}</dd>
                       <dt className="text-slate-500">Ada / Parsel</dt><dd className="text-right font-medium text-slate-800">{land.ada} / {land.parsel}</dd>
+                      <dt className="text-slate-500">Tapu tipi</dt><dd className="text-right font-medium text-slate-800">{ownershipLabels[land.ownership_type ?? 'MUSTAKIL']}</dd>
+                      {land.hisse_no && <><dt className="text-slate-500">Hisse No</dt><dd className="text-right font-medium text-slate-800">{land.hisse_no}</dd></>}
                     </dl>
                   </section>
                 )}
