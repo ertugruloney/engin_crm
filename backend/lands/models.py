@@ -92,6 +92,11 @@ class Land(models.Model):
     parcel_sheet = models.CharField(max_length=60, blank=True, default='')
     parcel_geometry = models.JSONField(blank=True, null=True)
     tkgm_synced_at = models.DateTimeField(blank=True, null=True)
+    # Claude ile üretilen son ilan metni (bkz. listing.generate_listing_text).
+    listing_text = models.TextField(blank=True, default='')
+    listing_generated_at = models.DateTimeField(blank=True, null=True)
+    # Belgeden girilen imar detayı (ör. "Villa imarlı %15/%30, 2 kat"); boşsa ilanda imar TKGM niteliğinden çıkarılır.
+    listing_imar_detail = models.CharField(max_length=300, blank=True, default='')
 
     def __str__(self):
         share = f" Hisse: {self.hisse_no}" if self.hisse_no else ''
@@ -325,3 +330,25 @@ class TkgmNeighborhood(models.Model):
     tkgm_id = models.CharField(max_length=20)
     template = models.CharField(max_length=500)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class FinanceSettings(models.Model):
+    # Taksitli satışlarda paranın bugünkü değeri bu aylık faizle hesaplanır (ör. 3.50 = aylık %3,5).
+    monthly_interest_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        verbose_name='Aylık faiz oranı (%)',
+        help_text='Taksitli satışlarda paranın bugünkü değerine göre zarar bu oranla hesaplanır. 0 ise hesaplanmaz.',
+    )
+
+    class Meta:
+        verbose_name = 'Finans ayarı'
+        verbose_name_plural = 'Finans ayarları'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return 'Finans ayarları'

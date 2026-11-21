@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { isAxiosError } from 'axios';
 import { Landmark, RefreshCw } from 'lucide-react';
-import { syncLandFromTkgm } from '../api';
-import type { TkgmNeighborhoodChoice } from '../api';
+import { syncLandFromTkgm, syncRepresentativeLandFromTkgm } from '../api';
+import type { RepresentativeLand, TkgmNeighborhoodChoice } from '../api';
 import type { Land } from '../types';
 
 type TkgmLand = Pick<Land, 'id' | 'ilce' | 'mahalle' | 'ada' | 'parsel'> &
@@ -41,15 +41,31 @@ function ParcelShape({ points, area }: { points: [number, number][]; area?: stri
 }
 
 // TKGM Parsel Sorgu bilgileri: alan, nitelik, mevki, pafta ve parsel şekli; yetkiliyse tek tuşla getirilir.
-export default function TkgmParcelPanel({ land, canEdit }: { land: TkgmLand; canEdit: boolean }) {
+export default function TkgmParcelPanel({
+  land,
+  canEdit,
+  representative = false,
+}: {
+  land: TkgmLand;
+  canEdit: boolean;
+  // Satış temsilcisi / çağrı merkezi ekranı: temsilci uç noktası kullanılır, yalnızca TKGM bilgisi güncellenir.
+  representative?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [choices, setChoices] = useState<TkgmNeighborhoodChoice[]>([]);
   const [choice, setChoice] = useState('');
   const mutation = useMutation({
-    mutationFn: (mahalleId?: number) => syncLandFromTkgm(land.id, mahalleId),
+    mutationFn: (mahalleId?: number) =>
+      representative ? syncRepresentativeLandFromTkgm(land.id, mahalleId) : syncLandFromTkgm(land.id, mahalleId),
     onSuccess: updatedLand => {
       setChoices([]);
-      queryClient.setQueryData<Land[]>(['lands'], current => current?.map(item => (item.id === updatedLand.id ? updatedLand : item)));
+      if (representative) {
+        queryClient.setQueryData<RepresentativeLand[]>(['representativeLands'], current =>
+          current?.map(item => (item.id === updatedLand.id ? (updatedLand as RepresentativeLand) : item)),
+        );
+        return;
+      }
+      queryClient.setQueryData<Land[]>(['lands'], current => current?.map(item => (item.id === updatedLand.id ? (updatedLand as Land) : item)));
       queryClient.invalidateQueries({ queryKey: ['lands'] });
       queryClient.invalidateQueries({ queryKey: ['landHistory', updatedLand.id] });
     },

@@ -14,6 +14,7 @@ import type { IdImages } from './IdImageFields';
 import { CANCEL_REASON_TREE } from '../customerDisplay';
 import PhoneNumberInput from './PhoneNumberInput';
 import LandLocationCard from './LandLocationCard';
+import { InstallmentLossPanel } from './InstallmentLoss';
 import { formatInternationalPhone, getPhoneValidationError, splitPhoneNumber } from '../phoneNumber';
 import type { CountryCode } from 'libphonenumber-js';
 
@@ -1042,6 +1043,7 @@ export default function LandDrawer({ land, onClose, embedded = false, onHistoryC
                           ))}
                         </div>
                       )}
+                      <InstallmentLossPanel loss={land.installment_loss} salePrice={land.sale_price} />
                     </>
                   ) : (
                     <p className="text-sm text-slate-500">

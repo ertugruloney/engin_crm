@@ -8,6 +8,7 @@ import { ownershipLabels, statusColors, statusLabels, parcelLabel } from '../typ
 import type { Land, LandStatus, OwnershipType } from '../types';
 import CreateLandModal from './CreateLandModal';
 import CenterDistancesInline from './CenterDistancesInline';
+import { InstallmentLossBadge } from './InstallmentLoss';
 import { FILTER_FIELDS, loadFilterVisibility } from '../filterSettings';
 
 interface LandFilters {
@@ -375,7 +376,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
               <th className="w-[35%] border-b border-slate-200 px-2 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 md:hidden">
                 Durum
               </th>
-              {['İl', 'İlçe', 'Mahalle', 'Ada', 'Parsel', 'Hisse No', 'Durum', 'Müşteri', 'Telefon', 'Not', 'Merkez uzaklığı'].map(label => (
+              {['İl', 'İlçe', 'Mahalle', 'Ada', 'Parsel', 'Hisse No', 'Durum', 'Taksit zararı', 'Müşteri', 'Telefon', 'Not', 'Merkez uzaklığı'].map(label => (
                 <th key={label} className="hidden border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:table-cell">
                   {label}
                 </th>
@@ -412,6 +413,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                   <span className={`inline-block max-w-full whitespace-normal rounded-full border px-2 py-1 text-center text-[11px] font-semibold leading-tight ${statusColors[land.status]}`}>
                     {statusLabels[land.status]}
                   </span>
+                  {land.installment_loss && <div className="mt-1.5"><InstallmentLossBadge loss={land.installment_loss} /></div>}
                 </td>
                 <td className="hidden whitespace-nowrap px-4 py-3 font-medium text-slate-800 md:table-cell">{land.il}</td>
                 <td className="hidden whitespace-nowrap px-4 py-3 text-slate-700 md:table-cell">{land.ilce}</td>
@@ -424,6 +426,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                     {statusLabels[land.status]}
                   </span>
                 </td>
+                <td className="hidden px-4 py-3 md:table-cell"><InstallmentLossBadge loss={land.installment_loss} /></td>
                 <td className="hidden whitespace-nowrap px-4 py-3 text-slate-700 md:table-cell">{land.customer_name || '—'}</td>
                 <td className="hidden whitespace-nowrap px-4 py-3 text-slate-700 md:table-cell">{land.customer_phone || '—'}</td>
                 <td className="hidden max-w-64 px-4 py-3 text-slate-700 md:table-cell">
@@ -439,7 +442,7 @@ export default function KanbanBoard({ isSalesSupport = false }: { isSalesSupport
                 <td colSpan={2} className="px-4 py-12 text-center text-slate-500 md:hidden">
                   Filtre kriterlerinize uygun arsa bulunamadı.
                 </td>
-                <td colSpan={11} className="hidden px-4 py-12 text-center text-slate-500 md:table-cell">
+                <td colSpan={12} className="hidden px-4 py-12 text-center text-slate-500 md:table-cell">
                   Filtre kriterlerinize uygun arsa bulunamadı.
                 </td>
               </tr>

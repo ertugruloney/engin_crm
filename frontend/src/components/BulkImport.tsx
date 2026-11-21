@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useState, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as xlsx from 'xlsx';
-import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Trash2 } from 'lucide-react';
+import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Trash2, Download } from 'lucide-react';
 import { bulkCreateLands, getLands } from '../api';
 import { ownershipLabels, statusLabels } from '../types';
 import type { Land, LandStatus, OwnershipType } from '../types';
@@ -105,6 +105,41 @@ const parseLocationCells = (row: Record<string, unknown>) => {
     longitude: latitude && longitude ? longitude : null,
     parcel_query_url: String(getCell(row, 'Parsel Sorgu Linki', 'Parsel Sorgu', 'Parcel Query URL') ?? '').trim(),
   };
+};
+
+const TEMPLATE_HEADERS = [
+  'İl', 'İlçe', 'Mahalle', 'Ada No', 'Parsel No', 'Tapu Tipi', 'Hisse No',
+  'Durum', 'Satış Bedeli', 'Not', 'Enlem', 'Boylam', 'Parsel Sorgu Linki',
+];
+
+const TEMPLATE_ROWS: (string | number)[][] = [
+  ['İstanbul', 'Arnavutköy', 'Yassıören', '101', '1', 'Müstakil', '', 'Satışa Uygun', '', '', '', '', ''],
+  ['İstanbul', 'Silivri', 'Çanta', '255', '12', 'Müstakil', '', 'Tapu', 1500000, 'Örnek not', '41.0731', '28.2465', ''],
+  ['Tekirdağ', 'Çorlu', 'Esentepe', '45', '7', 'Hisseli', '1', 'Satışa Uygun', '', '', '', '', ''],
+  ['Tekirdağ', 'Çorlu', 'Esentepe', '45', '7', 'Hisseli', '2', 'Rezerv', '', '', '', '', ''],
+];
+
+const downloadTemplate = () => {
+  const sheet = xlsx.utils.aoa_to_sheet([TEMPLATE_HEADERS, ...TEMPLATE_ROWS]);
+  sheet['!cols'] = TEMPLATE_HEADERS.map(header => ({ wch: Math.max(12, header.length + 4) }));
+  const guide = xlsx.utils.aoa_to_sheet([
+    ['Sütun', 'Zorunlu', 'Açıklama'],
+    ['İl / İlçe / Mahalle', 'Evet', 'Arsanın konumu'],
+    ['Ada No / Parsel No', 'Evet', 'Tapu ada ve parsel numarası'],
+    ['Durum', 'Evet', 'Satışa Uygun, Rezerv, Kapora Alındı veya Tapu (boşsa Satışa Uygun)'],
+    ['Tapu Tipi', 'Hayır', 'Müstakil veya Hisseli (boşsa Hisse No varsa Hisseli, yoksa Müstakil)'],
+    ['Hisse No', 'Hisseli ise', 'Her hisse ayrı satır; aynı ada/parselde her numara bir kez (ör. 1, 2 ya da 1/10)'],
+    ['Satış Bedeli', 'Tapu ise', 'TL, sıfırdan büyük (ör. 1500000 veya 1.500.000,00)'],
+    ['Not', 'Hayır', 'Serbest metin'],
+    ['Enlem / Boylam', 'Hayır', 'Ondalık koordinat (ör. 41.0731 / 28.2465); ikisi birlikte girilmeli'],
+    ['Parsel Sorgu Linki', 'Hayır', 'TKGM parsel sorgu bağlantısı'],
+    ['', '', 'Örnek satırları silip kendi verinizi girin. Sadece ilk sayfa (Arsalar) okunur.'],
+  ]);
+  guide['!cols'] = [{ wch: 22 }, { wch: 12 }, { wch: 80 }];
+  const workbook = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(workbook, sheet, 'Arsalar');
+  xlsx.utils.book_append_sheet(workbook, guide, 'Açıklama');
+  xlsx.writeFile(workbook, 'toplu_arsa_sablonu.xlsx');
 };
 
 export default function BulkImport({
@@ -305,7 +340,17 @@ export default function BulkImport({
           </button>
         </div>
 
-        <div className="mt-6 p-4 bg-slate-50 rounded-lg border border-slate-100 flex items-start text-sm text-slate-600">
+        <div className="mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={downloadTemplate}
+            className="inline-flex items-center rounded-lg border border-green-200 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100 transition-colors"
+          >
+            <Download size={16} className="mr-1.5" /> Excel Şablonunu İndir
+          </button>
+        </div>
+
+        <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-100 flex items-start text-sm text-slate-600">
           <AlertCircle size={20} className="text-amber-500 mr-3 shrink-0 mt-0.5" />
           <div>
             <strong>Excel sütunları:</strong> İl, İlçe, Mahalle, Ada No, Parsel No ve Durum.

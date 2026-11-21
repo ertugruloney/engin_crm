@@ -19,6 +19,14 @@ export interface LandInstallment {
   amount: string;
 }
 
+export interface InstallmentLoss {
+  monthly_interest_rate: string;
+  reference_date: string;
+  present_value: string;
+  loss_amount: string;
+  loss_percent: number | null;
+}
+
 export interface Land {
   id: number;
   il: string;
@@ -42,6 +50,8 @@ export interface Land {
   // Taksitli satışta kaporaya ek peşin ödeme; taksitler satış bedeli - kapora - peşinat üzerinden bölünür.
   down_payment?: string | null;
   installment_plan: LandInstallment[];
+  // Yalnızca yönetici: taksitli satışta aylık faize göre paranın bugünkü değeri ve zarar (faiz 0 ya da peşin satışta null).
+  installment_loss?: InstallmentLoss | null;
   title_deed_image: string | null;
   // Kimlik fotoğraflarının yetkili indirme adresi (yalnızca yönetici/satış destek); yoksa null.
   id_front_image?: string | null;
@@ -63,6 +73,11 @@ export interface Land {
   parcel_sheet?: string;
   parcel_geometry?: [number, number][] | null;
   tkgm_synced_at?: string | null;
+  // Claude ile üretilen son ilan metni (tüm roller oluşturabilir).
+  listing_text?: string;
+  listing_generated_at?: string | null;
+  // Belgeden girilen imar detayı (çağrı merkezi); boşsa ilanda imar TKGM niteliğinden çıkarılır.
+  listing_imar_detail?: string;
   status_history: LandStatusHistory[];
 }
 

@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import LandViewSet
 from .customer_views import CustomerViewSet
 from .presentation_views import presentation_report
+from .listing_views import generate_land_listing, update_listing_imar_detail
 from .tkgm_views import tkgm_districts, tkgm_neighborhoods, tkgm_provinces
 from .auth_views import (
     audit_log_summary,
@@ -12,6 +13,7 @@ from .auth_views import (
     representative_lands,
     representative_settings,
     add_representative_land_note,
+    representative_tkgm_sync,
     reserve_land,
     take_land_deposit,
     sales_leaderboard,
@@ -21,6 +23,7 @@ from .notification_views import (
     notification_counts,
     notification_read,
     notification_settings_view,
+    finance_settings_view,
     notifications_list,
     notifications_read_all,
 )
@@ -40,15 +43,19 @@ urlpatterns = [
     path('tkgm/il/<int:province_id>/ilce/', tkgm_districts),
     path('tkgm/ilce/<int:district_id>/mahalle/', tkgm_neighborhoods),
     path('lands/<int:land_id>/history/', land_history),
+    path('lands/<int:land_id>/listing/', generate_land_listing),
+    path('lands/<int:land_id>/listing/imar/', update_listing_imar_detail),
     path('notifications/', notifications_list),
     path('notifications/counts/', notification_counts),
     path('notifications/read-all/', notifications_read_all),
     path('notifications/settings/', notification_settings_view),
+    path('finance/settings/', finance_settings_view),
     path('notifications/<int:pk>/read/', notification_read),
     path('representative/lands/', representative_lands),
     path('representative/settings/', representative_settings),
     path('representative/lands/<int:land_id>/reserve/', reserve_land),
     path('representative/lands/<int:land_id>/deposit/', take_land_deposit),
     path('representative/lands/<int:land_id>/notes/', add_representative_land_note),
+    path('representative/lands/<int:land_id>/tkgm-sync/', representative_tkgm_sync),
     path('', include(router.urls)),
 ]

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .audit import record_admin_action
-from .models import Notification, NotificationSettings, RepresentativeSettings
+from .models import FinanceSettings, Notification, NotificationSettings, RepresentativeSettings
 from .notifications import notify
 
 
@@ -72,3 +72,24 @@ class NotificationSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(FinanceSettings)
+class FinanceSettingsAdmin(admin.ModelAdmin):
+    fields = ['monthly_interest_rate']
+    list_display = ['__str__', 'monthly_interest_rate']
+
+    def has_add_permission(self, request):
+        return not FinanceSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        previous = FinanceSettings.objects.filter(pk=1).values_list('monthly_interest_rate', flat=True).first()
+        super().save_model(request, obj, form, change)
+        if previous != obj.monthly_interest_rate:
+            record_admin_action(
+                request, 'finance_settings.updated', 'finance_settings', obj.pk,
+                {'monthly_interest_rate': {'old': str(previous) if previous is not None else None, 'new': str(obj.monthly_interest_rate)}},
+            )

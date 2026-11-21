@@ -38,12 +38,22 @@ from .serializers import (
 VIEWER_GROUP = 'Satış Temsilcisi'
 SALES_SUPPORT_GROUP = 'Satış Destek'
 LEGACY_VIEWER_GROUP = 'Boş Arsa Görüntüleyici'
+# Çağrı merkezi: satış temsilcisiyle aynı ekranı görür ama hiçbir işlem (rezerv, kapora, not) yapamaz.
+CALL_CENTER_GROUP = 'Çağrı Merkezi'
+APP_ROLE_GROUPS = [VIEWER_GROUP, SALES_SUPPORT_GROUP, LEGACY_VIEWER_GROUP, CALL_CENTER_GROUP]
+ROLE_GROUPS = {
+    'sales_representative': VIEWER_GROUP,
+    'sales_support': SALES_SUPPORT_GROUP,
+    'call_center': CALL_CENTER_GROUP,
+}
 
 
 def is_sales_representative(user):
-    return user.groups.filter(
-        name__in=[VIEWER_GROUP, SALES_SUPPORT_GROUP, LEGACY_VIEWER_GROUP],
-    ).exists()
+    return user.groups.filter(name__in=APP_ROLE_GROUPS).exists()
+
+
+def is_call_center(user):
+    return user.groups.filter(name=CALL_CENTER_GROUP).exists()
 
 
 def is_sales_support(user):
@@ -55,12 +65,21 @@ def user_role(user):
         return 'admin'
     if is_sales_support(user):
         return 'sales_support'
+    if is_call_center(user):
+        return 'call_center'
     return 'sales_representative'
 
 
 class IsSalesRepresentative(BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and not request.user.is_staff and is_sales_representative(request.user)
+
+
+class IsActingSalesRepresentative(IsSalesRepresentative):
+    """Temsilci işlemleri (rezerv, kapora, not); çağrı merkezi yalnızca görüntüler."""
+
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) and not is_call_center(request.user)
 
 
 class IsAdminOrSalesSupport(BasePermission):
@@ -137,7 +156,7 @@ class ViewerUserCreateSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
     password = serializers.CharField(min_length=8, write_only=True, trim_whitespace=False)
     role = serializers.ChoiceField(
-        choices=['sales_representative', 'sales_support'],
+        choices=list(ROLE_GROUPS),
         default='sales_representative',
     )
 
@@ -161,7 +180,7 @@ class ViewerUserCreateSerializer(serializers.Serializer):
         role = validated_data['role']
         user_data = {key: value for key, value in validated_data.items() if key != 'role'}
         user = get_user_model().objects.create_user(**user_data)
-        group_name = SALES_SUPPORT_GROUP if role == 'sales_support' else VIEWER_GROUP
+        group_name = ROLE_GROUPS[role]
         group, _ = Group.objects.get_or_create(name=group_name)
         user.groups.add(group)
         return user
@@ -174,7 +193,7 @@ def users_view(request):
 
     if request.method == 'GET':
         users = get_user_model().objects.filter(
-            groups__name__in=[VIEWER_GROUP, SALES_SUPPORT_GROUP, LEGACY_VIEWER_GROUP],
+            groups__name__in=APP_ROLE_GROUPS,
         ).distinct().order_by('username')
         return Response([user_payload(user) for user in users])
 
@@ -333,7 +352,7 @@ def audit_log_summary(request):
         action_counts.setdefault(row['actor_username'], {})[row['action']] = row['count']
 
     users = get_user_model().objects.filter(
-        Q(is_staff=True) | Q(groups__name__in=[VIEWER_GROUP, SALES_SUPPORT_GROUP, LEGACY_VIEWER_GROUP]),
+        Q(is_staff=True) | Q(groups__name__in=APP_ROLE_GROUPS),
     ).distinct()
 
     results = []
@@ -521,6 +540,7 @@ def representative_settings(request):
         'can_view_reservation_details': representative_reservation_details_visible(request.user),
         'max_stage': representative_max_stage(),
         'can_add_notes': representative_notes_allowed(request.user),
+        'read_only': is_call_center(request.user),
     })
 
 
@@ -589,7 +609,7 @@ def _reserve_for_representative(request, land, reservation_data):
 
 @api_view(['POST'])
 @parser_classes([JSONParser])
-@permission_classes([IsSalesRepresentative])
+@permission_classes([IsActingSalesRepresentative])
 def reserve_land(request, land_id):
     with transaction.atomic():
         land = get_object_or_404(
@@ -603,7 +623,7 @@ def reserve_land(request, land_id):
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser, JSONParser])
-@permission_classes([IsSalesRepresentative])
+@permission_classes([IsActingSalesRepresentative])
 def take_land_deposit(request, land_id):
     """Temsilci kapora tutarı ve kimlik fotoğraflarıyla rezervdeki arsayı "Kapora Alındı" aşamasına taşır.
 
@@ -673,7 +693,7 @@ def take_land_deposit(request, land_id):
 
 @api_view(['POST'])
 @parser_classes([JSONParser])
-@permission_classes([IsSalesRepresentative])
+@permission_classes([IsActingSalesRepresentative])
 def add_representative_land_note(request, land_id):
     """Temsilci arsaya not ekler; not tarih, saat ve kullanıcı adıyla mevcut notların sonuna yazılır."""
     if not representative_notes_allowed(request.user):
@@ -712,4 +732,41 @@ def add_representative_land_note(request, land_id):
             target_id=land.pk,
             context={'land_label': label, 'note': note if len(note) <= 120 else f'{note[:117]}...'},
         )
+    return _representative_land_response(request, land)
+
+
+@api_view(['POST'])
+@parser_classes([JSONParser])
+@permission_classes([IsSalesRepresentative])
+def representative_tkgm_sync(request, land_id):
+    """Temsilci ve çağrı merkezi arsanın Tapu Kadastro (TKGM) bilgilerini getirebilir; başka alan değişmez."""
+    from . import tkgm
+    from .tkgm_sync import ParcelNotFound, sync_land_from_tkgm
+
+    land = get_object_or_404(Land, pk=land_id)
+    mahalle_id = request.data.get('mahalle_id')
+    if mahalle_id not in (None, '') and not str(mahalle_id).isdigit():
+        return Response({'detail': 'Geçersiz mahalle numarası.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        sync_land_from_tkgm(land, mahalle_id=int(mahalle_id) if mahalle_id not in (None, '') else None)
+    except ParcelNotFound as error:
+        return Response(
+            {'detail': str(error), 'candidates': [{'id': item['id'], 'name': item['text']} for item in error.candidates]},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except tkgm.TkgmError as error:
+        return Response({'detail': str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+    land.refresh_from_db()
+    record_user_action(
+        request,
+        'land.tkgm_synced',
+        'land',
+        land.pk,
+        {
+            'land_label': land_label(land),
+            'tkgm_mahalle_id': land.tkgm_mahalle_id,
+            'parcel_area': str(land.parcel_area) if land.parcel_area is not None else None,
+            'parcel_quality': land.parcel_quality,
+        },
+    )
     return _representative_land_response(request, land)

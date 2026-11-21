@@ -4,3 +4,4 @@ django-cors-headers
 Pillow
 python-pptx
 reportlab
+anthropic

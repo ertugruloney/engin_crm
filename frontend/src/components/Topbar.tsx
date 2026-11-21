@@ -10,6 +10,7 @@ const ROLE_LABELS: Record<AppUser['role'], string> = {
   admin: 'Yönetici',
   sales_support: 'Satış Destek',
   sales_representative: 'Satış Temsilcisi',
+  call_center: 'Çağrı Merkezi',
 };
 
 // "mert.engin" -> "ME", "mert" -> "ME"

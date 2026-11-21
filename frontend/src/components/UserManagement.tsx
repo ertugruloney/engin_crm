@@ -53,6 +53,7 @@ export default function UserManagement() {
             >
               <option value="sales_representative">Satış Temsilcisi</option>
               <option value="sales_support">Satış Destek</option>
+              <option value="call_center">Çağrı Merkezi (yalnızca görüntüler)</option>
             </select>
           </label>
           <label className="text-sm font-medium text-slate-700">
@@ -124,9 +125,11 @@ export default function UserManagement() {
                       <span className={`rounded-full px-3 py-1 text-xs font-medium ${
                         user.role === 'sales_support'
                           ? 'bg-violet-50 text-violet-700'
-                          : 'bg-amber-50 text-amber-700'
+                          : user.role === 'call_center'
+                            ? 'bg-sky-50 text-sky-700'
+                            : 'bg-amber-50 text-amber-700'
                       }`}>
-                        {user.role === 'sales_support' ? 'Satış Destek' : 'Satış Temsilcisi'}
+                        {user.role === 'sales_support' ? 'Satış Destek' : user.role === 'call_center' ? 'Çağrı Merkezi' : 'Satış Temsilcisi'}
                       </span>
                     </span>
                   </button>

@@ -378,9 +378,10 @@ export default function AvailableLandsPage() {
 
       {selectedLand && (
         <RepresentativeLandDetails
-          land={selectedLand}
+          land={lands.find(item => item.id === selectedLand.id) ?? selectedLand}
           canViewReservationDetails={representativeSettings?.can_view_reservation_details ?? false}
           canAddNotes={representativeSettings?.can_add_notes ?? false}
+          readOnly={representativeSettings?.read_only === true}
           onClose={() => setSelectedLand(null)}
           onReserve={(land, mode) => {
             setSelectedLand(null);

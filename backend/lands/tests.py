@@ -2090,3 +2090,248 @@ class PresentationReportTests(APITestCase):
             user.groups.add(Group.objects.get_or_create(name=group_name)[0])
             self.client.force_authenticate(user=user)
             self.assertEqual(self.client.get(self.url, {'type': 'pdf'}).status_code, 403)
+
+
+class InstallmentLossTests(APITestCase):
+    def setUp(self):
+        from datetime import date
+        from .models import FinanceSettings, LandStatusHistory
+        self.admin = User.objects.create_superuser(username='finans-admin', password='pass12345')
+        self.land = Land.objects.create(
+            il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='1', status='TAPU',
+            sale_price=Decimal('120000'), deposit_amount=Decimal('10000'), down_payment=Decimal('10000'),
+            installment_plan=[
+                {'due_date': '2026-02-01', 'amount': '50000.00'},
+                {'due_date': '2027-01-01', 'amount': '50000.00'},
+            ],
+        )
+        entry = LandStatusHistory.objects.create(land=self.land, status='TAPU')
+        LandStatusHistory.objects.filter(pk=entry.pk).update(
+            transitioned_at=timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0)),
+        )
+        self.FinanceSettings = FinanceSettings
+        self.date = date
+
+    def test_loss_hidden_when_rate_is_zero(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(f'/api/lands/{self.land.pk}/')
+        self.assertIsNone(response.data['installment_loss'])
+
+    def test_loss_uses_monthly_rate_from_sale_date(self):
+        self.FinanceSettings.objects.create(monthly_interest_rate=Decimal('2.00'))
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(f'/api/lands/{self.land.pk}/')
+        loss = response.data['installment_loss']
+        months_1 = 31 / (365.25 / 12)
+        months_2 = 365 / (365.25 / 12)
+        expected_pv = 20000 + 50000 / 1.02 ** months_1 + 50000 / 1.02 ** months_2
+        self.assertEqual(loss['reference_date'], '2026-01-01')
+        self.assertAlmostEqual(float(loss['present_value']), expected_pv, places=1)
+        self.assertAlmostEqual(float(loss['loss_amount']), 120000 - expected_pv, places=1)
+        self.assertAlmostEqual(loss['loss_percent'], round((120000 - expected_pv) / 1200, 2), places=2)
+
+    def test_finance_settings_endpoint_admin_only(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.put('/api/finance/settings/', {'monthly_interest_rate': '3.5'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.FinanceSettings.objects.get(pk=1).monthly_interest_rate, Decimal('3.50'))
+        user = User.objects.create_user(username='normal', password='pass12345')
+        self.client.force_authenticate(user=user)
+        self.assertEqual(self.client.get('/api/finance/settings/').status_code, 403)
+
+
+class CallCenterRoleTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(username='cc-admin', password='pass12345')
+        self.land = Land.objects.create(il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='1')
+        self.reserved = Land.objects.create(
+            il='İstanbul', ilce='Silivri', mahalle='Çanta', ada='1', parsel='2', status='REZERV',
+            customer_name='Ali Veli', customer_phone='+905551112233',
+        )
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(
+            '/api/users/', {'username': 'cagri1', 'password': 'Guclu-Parola-123', 'role': 'call_center'}, format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['role'], 'call_center')
+        self.user = User.objects.get(username='cagri1')
+        self.client.force_authenticate(user=self.user)
+
+    def test_call_center_sees_representative_screen(self):
+        settings = self.client.get('/api/representative/settings/')
+        self.assertEqual(settings.status_code, 200)
+        self.assertTrue(settings.data['read_only'])
+        lands = self.client.get('/api/representative/lands/')
+        self.assertEqual(lands.status_code, 200)
+        self.assertEqual(len(lands.data), 2)
+        self.assertTrue(all(not land['can_take_deposit'] for land in lands.data))
+
+    def test_call_center_cannot_act(self):
+        reserve = self.client.post(
+            f'/api/representative/lands/{self.land.pk}/reserve/',
+            {'customer_name': 'Ayşe', 'customer_phone': '+905551112244'}, format='json',
+        )
+        self.assertEqual(reserve.status_code, 403)
+        note = self.client.post(f'/api/representative/lands/{self.land.pk}/notes/', {'note': 'deneme'}, format='json')
+        self.assertEqual(note.status_code, 403)
+        deposit = self.client.post(f'/api/representative/lands/{self.reserved.pk}/deposit/', {'deposit_amount': '1000'})
+        self.assertEqual(deposit.status_code, 403)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.status, 'BOS')
+        self.assertEqual(self.client.patch(f'/api/lands/{self.land.pk}/', {'status': 'REZERV'}, format='json').status_code, 403)
+
+
+class RepresentativeTkgmSyncTests(TkgmSyncTests):
+    def sync_as(self, group_name):
+        from unittest import mock
+        user = User.objects.create_user(username=f'u-{group_name}', password='pass12345')
+        user.groups.add(Group.objects.get_or_create(name=group_name)[0])
+        self.client.force_authenticate(user=user)
+        with mock.patch('lands.tkgm.fetch_json', side_effect=self.fake_fetch):
+            return self.client.post(f'/api/representative/lands/{self.land.id}/tkgm-sync/', {}, format='json')
+
+    def test_sales_representative_and_call_center_can_fetch_tkgm(self):
+        from .auth_views import CALL_CENTER_GROUP
+        for group_name in (VIEWER_GROUP, CALL_CENTER_GROUP):
+            Land.objects.filter(pk=self.land.pk).update(tkgm_synced_at=None, parcel_area=None)
+            response = self.sync_as(group_name)
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data['parcel_area'], '6054.18')
+            self.land.refresh_from_db()
+            self.assertEqual(self.land.status, 'BOS')
+
+
+class LandListingTests(APITestCase):
+    def setUp(self):
+        self.land = Land.objects.create(
+            il='Aydın', ilce='Didim', mahalle='Akyeniköy', ada='1891', parsel='13',
+            parcel_area=Decimal('300'), parcel_quality='Arsa',
+            customer_name='Gizli Müşteri', customer_phone='+905551112233', sale_price=Decimal('900000'),
+        )
+
+    def fake_response(self, text='🏡 Didim Akyeniköy satılık arsa', stop_reason='end_turn'):
+        from types import SimpleNamespace
+        return SimpleNamespace(stop_reason=stop_reason, content=[SimpleNamespace(type='text', text=text)])
+
+    def post_as(self, user, response=None, side_effect=None, data=None):
+        from unittest import mock
+        self.client.force_authenticate(user=user)
+        with mock.patch('lands.listing.anthropic.Anthropic') as client_class, \
+                mock.patch('lands.listing_views.sync_land_from_tkgm', create=True), \
+                mock.patch('lands.tkgm_sync.sync_land_from_tkgm'), \
+                mock.patch('lands.listing.fetch_nearby_places', return_value=['Okul: Akyeniköy İlkokulu ~1,2 km']), \
+                mock.patch('lands.listing.ensure_center', return_value=(37.38, 27.26)), \
+                mock.patch('lands.listing.driving_route', return_value=(24.4, 24)):
+            create = client_class.return_value.beta.messages.create
+            create.return_value = response or self.fake_response()
+            if side_effect:
+                create.side_effect = side_effect
+            result = self.client.post(f'/api/lands/{self.land.pk}/listing/', data or {}, format='json')
+        return result, create
+
+    def make_user(self, group_name=None, admin=False):
+        if admin:
+            return User.objects.create_superuser(username=f'l-admin-{User.objects.count()}', password='pass12345')
+        user = User.objects.create_user(username=f'l-{group_name}-{User.objects.count()}', password='pass12345')
+        if group_name:
+            user.groups.add(Group.objects.get_or_create(name=group_name)[0])
+        return user
+
+    def call_center(self):
+        from .auth_views import CALL_CENTER_GROUP
+        return self.make_user(CALL_CENTER_GROUP)
+
+    def test_only_call_center_can_generate_and_private_data_is_not_sent(self):
+        response, create = self.post_as(self.call_center())
+        self.assertEqual(response.status_code, 200, response.data)
+        prompt = create.call_args.kwargs['messages'][0]['content']
+        self.assertIn('Ada/Parsel: 1891/13', prompt)
+        self.assertIn('Alan: 300,00 m²', prompt)
+        self.assertIn('Nitelik: Arsa', prompt)
+        self.assertIn('İmar: Var (tapuda arsa vasıflı)', prompt)
+        self.assertEqual(create.call_args.kwargs['tools'][0]['type'], 'web_search_20260209')
+        self.assertNotIn('Gizli', prompt)
+        self.assertNotIn('900', prompt)
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.listing_text, '🏡 Didim Akyeniköy satılık arsa')
+
+        for user in (self.make_user(admin=True), self.make_user(VIEWER_GROUP), self.make_user(SALES_SUPPORT_GROUP), self.make_user()):
+            response, create = self.post_as(user)
+            self.assertEqual(response.status_code, 403, user.username)
+            create.assert_not_called()
+
+    def test_refusal_reported(self):
+        response, _ = self.post_as(self.call_center(), response=self.fake_response(text='', stop_reason='refusal'))
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('reddetti', response.data['detail'])
+
+    def test_pause_turn_is_continued_and_only_final_text_kept(self):
+        from types import SimpleNamespace
+        paused = SimpleNamespace(stop_reason='pause_turn', content=[SimpleNamespace(type='server_tool_use')])
+        final = SimpleNamespace(stop_reason='end_turn', content=[
+            SimpleNamespace(type='text', text='Bölgeyi araştırıyorum.'),
+            SimpleNamespace(type='web_search_tool_result'),
+            SimpleNamespace(type='text', text='🌲🌊 Akyeniköy'),
+            SimpleNamespace(type='text', text=' ilanı'),
+        ])
+        response, create = self.post_as(self.call_center(), side_effect=[paused, final])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(create.call_args.kwargs['messages'][-1]['role'], 'assistant')
+        self.assertEqual(response.data['listing_text'], '🌲🌊 Akyeniköy ilanı')
+
+
+    def test_map_data_sent_and_phone_not_in_prompt(self):
+        Land.objects.filter(pk=self.land.pk).update(latitude=Decimal('37.505720'), longitude=Decimal('27.361458'))
+        response, create = self.post_as(self.call_center())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(set(response.data), {'listing_text', 'listing_generated_at'})
+        prompt = create.call_args.kwargs['messages'][0]['content']
+        self.assertIn('İmar: Var (tapuda arsa vasıflı)', prompt)
+        self.assertIn('Yakındaki yerler: Okul: Akyeniköy İlkokulu ~1,2 km', prompt)
+        self.assertIn('Didim (ilçe merkezi): araçla ~24 km, ~24 dk', prompt)
+        for removed in ('Telefon', 'Yol:', 'Elektrik/su', 'Çevre:'):
+            self.assertNotIn(removed, prompt)
+        self.assertNotIn('📞', create.call_args.kwargs['system'])
+
+    def test_call_center_saves_imar_detail_used_in_prompt(self):
+        cc = self.call_center()
+        self.client.force_authenticate(user=cc)
+        response = self.client.patch(
+            f'/api/lands/{self.land.pk}/listing/imar/', {'listing_imar_detail': '  Villa imarlı %15/%30, 2 kat '}, format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['listing_imar_detail'], 'Villa imarlı %15/%30, 2 kat')
+        self.land.refresh_from_db()
+        self.assertEqual(self.land.listing_imar_detail, 'Villa imarlı %15/%30, 2 kat')
+        _, create = self.post_as(cc)
+        self.assertIn('İmar: Villa imarlı %15/%30, 2 kat', create.call_args.kwargs['messages'][0]['content'])
+        lands = self.client.get('/api/representative/lands/')
+        self.assertEqual(next(l for l in lands.data if l['id'] == self.land.pk)['listing_imar_detail'], 'Villa imarlı %15/%30, 2 kat')
+
+        for user in (self.make_user(admin=True), self.make_user(VIEWER_GROUP), self.make_user(SALES_SUPPORT_GROUP)):
+            self.client.force_authenticate(user=user)
+            response = self.client.patch(f'/api/lands/{self.land.pk}/listing/imar/', {'listing_imar_detail': 'x'}, format='json')
+            self.assertEqual(response.status_code, 403, user.username)
+
+class ImarBilgisiTests(APITestCase):
+    def test_imar_inferred_from_tkgm_quality(self):
+        from .listing import imar_bilgisi
+        self.assertEqual(imar_bilgisi('Arsa'), 'Var (tapuda arsa vasıflı)')
+        self.assertEqual(imar_bilgisi('Tarla'), 'Yok (tapuda tarla vasıflı)')
+        self.assertEqual(imar_bilgisi('Zeytinlik'), 'Yok (tapuda zeytinlik vasıflı)')
+        self.assertEqual(imar_bilgisi(''), '')
+        self.assertEqual(imar_bilgisi('Tarla', 'Villa imarlı %15/%30'), 'Villa imarlı %15/%30')
+
+
+    def test_placeholder_lines_and_empty_sections_removed(self):
+        from .listing import remove_placeholders
+        text = (
+            '🌲🌊 300 M² AKYENİKÖY 🌊🌲\nGiriş.\n\n📍 Arsa bilgileri\n* Konum: Didim\n* Yol: [yol durumu]\n\n'
+            '🏗️ Çevre ve yapılaşma\n* Yeni evler yapılıyor\n* [Çevre bilgisi 1]\n\n* Elektrik / su: Var\n\n🚗 Mesafeler\n* Didim ~24 km\n* [Havalimanı mesafesi]\n\n'
+            '🏡 Kapanış.\n📞 [Telefon]'
+        )
+        self.assertEqual(
+            remove_placeholders(text),
+            '🌲🌊 300 M² AKYENİKÖY 🌊🌲\nGiriş.\n\n📍 Arsa bilgileri\n* Konum: Didim\n\n🚗 Mesafeler\n* Didim ~24 km\n\n🏡 Kapanış.',
+        )

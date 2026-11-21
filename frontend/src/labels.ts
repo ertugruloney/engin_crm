@@ -11,6 +11,7 @@ export const ACTION_LABELS: Record<string, string> = {
   'customer.updated': 'Müşteri bilgileri güncellendi',
   'user.created': 'Kullanıcı oluşturuldu',
   'notification_settings.updated': 'Bildirim ayarları güncellendi',
+  'finance_settings.updated': 'Aylık faiz oranı güncellendi',
   'settings.updated': 'Temsilci ayarı güncellendi',
   'report.exported': 'Sunum raporu indirildi',
 };
@@ -21,7 +22,9 @@ export const TARGET_LABELS: Record<string, string> = {
   session: 'Oturum',
   sales_representative: 'Satış temsilcisi',
   sales_support: 'Satış destek',
+  call_center: 'Çağrı merkezi',
   representative_settings: 'Temsilci ayarları',
   notification_settings: 'Bildirim ayarları',
+  finance_settings: 'Finans ayarları',
   report: 'Rapor',
 };

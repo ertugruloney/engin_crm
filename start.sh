@@ -38,6 +38,12 @@ else
 fi
 
 cd "$ROOT_DIR/backend"
+# Gizli ayarlar (ör. ANTHROPIC_API_KEY) git'e girmeyen backend/.env dosyasından okunur.
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
 if [ ! -d "venv" ]; then
     echo "Creating backend virtual environment..."
     python3 -m venv venv

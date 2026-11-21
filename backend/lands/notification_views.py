@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from .audit import record_admin_action
-from .models import Notification
+from .models import FinanceSettings, Notification
 from .notifications import NOTIFICATION_DEFINITIONS, notification_settings
 
 
@@ -148,3 +148,35 @@ def notification_settings_view(request):
             {'disabled_codes': {'old': previous, 'new': disabled}},
         )
     return Response({'settings': notification_settings_payload()})
+
+
+class FinanceSettingsSerializer(serializers.ModelSerializer):
+    monthly_interest_rate = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=0, max_value=100,
+    )
+
+    class Meta:
+        model = FinanceSettings
+        fields = ['monthly_interest_rate']
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAdminUser])
+def finance_settings_view(request):
+    settings, _ = FinanceSettings.objects.get_or_create(pk=1)
+    if request.method == 'GET':
+        return Response(FinanceSettingsSerializer(settings).data)
+
+    previous = settings.monthly_interest_rate
+    serializer = FinanceSettingsSerializer(settings, data=request.data)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    if previous != settings.monthly_interest_rate:
+        record_admin_action(
+            request,
+            'finance_settings.updated',
+            'finance_settings',
+            settings.pk,
+            {'monthly_interest_rate': {'old': str(previous), 'new': str(settings.monthly_interest_rate)}},
+        )
+    return Response(serializer.data)

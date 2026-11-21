@@ -4,7 +4,6 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
-  Building2,
   CalendarDays,
   CalendarPlus,
   Check,
@@ -584,19 +583,12 @@ export default function DashboardPage() {
     const sparkAmount = Array<number>(SPARK_BUCKETS).fill(0);
     const sparkSales = Array<number>(SPARK_BUCKETS).fill(0);
     const sparkCustomers = Array.from({ length: SPARK_BUCKETS }, () => new Set<string>());
-    // Portföy değeri: fiyatı girilmiş arsaların, sürece girdikleri andan itibaren toplam değeri.
-    const portfolio: { since: number; price: number }[] = [];
 
     for (const land of lands) {
       byStatus[land.status] += 1;
       byCity[land.il] = (byCity[land.il] ?? 0) + 1;
       const price = Number(land.sale_price ?? 0);
       const customer = land.customer_name.trim().toLocaleLowerCase('tr-TR');
-
-      if (price > 0) {
-        const first = land.status_history[0];
-        portfolio.push({ since: first ? new Date(first.transitioned_at).getTime() : 0, price });
-      }
 
       if (customer) {
         for (const entry of land.status_history) {
@@ -625,10 +617,6 @@ export default function DashboardPage() {
       }
     }
 
-    const portfolioAt = (time: number) =>
-      portfolio.reduce((sum, item) => (item.since <= time ? sum + item.price : sum), 0);
-    const portfolioNow = portfolioAt(bounds.to.getTime());
-
     return {
       total: lands.length,
       byStatus,
@@ -640,16 +628,10 @@ export default function DashboardPage() {
       salesTrend: getTrend(sales.current, sales.previous),
       customers: customers.current.size,
       customersTrend: getTrend(customers.current.size, customers.previous.size),
-      portfolio: portfolioNow,
-      portfolioTrend: getTrend(portfolioNow, portfolioAt(bounds.prevTo.getTime())),
-      pricedLands: portfolio.length,
       spark: {
         amount: sparkAmount,
         sales: sparkSales,
         customers: sparkCustomers.map(set => set.size),
-        portfolio: Array.from({ length: SPARK_BUCKETS }, (_, index) =>
-          portfolioAt(bounds.from.getTime() + ((index + 1) / SPARK_BUCKETS) * span),
-        ),
       },
     };
   }, [lands, bounds]);
@@ -798,7 +780,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Özet kartları */}
-      <section aria-label="Özet" className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+      <section aria-label="Özet" className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
         <StatCard
           icon={Coins}
           tone="blue"
@@ -825,16 +807,6 @@ export default function DashboardPage() {
           trend={stats.customersTrend}
           compareLabel={compareLabel}
           spark={stats.spark.customers}
-        />
-        <StatCard
-          icon={Building2}
-          tone="teal"
-          label="Portföy Değeri"
-          value={formatCurrency(stats.portfolio)}
-          trend={stats.portfolioTrend}
-          compareLabel={compareLabel}
-          note={`${stats.pricedLands} fiyatlı arsa`}
-          spark={stats.spark.portfolio}
         />
       </section>
 

@@ -6,6 +6,8 @@ import { addRepresentativeLandNote } from '../api';
 import type { RepresentativeLand } from '../api';
 import { statusColors, statusLabels, parcelLabel } from '../types';
 import LandLocationCard from './LandLocationCard';
+import ListingTextPanel from './ListingTextPanel';
+import ErrorBoundary from './ErrorBoundary';
 import type { ReserveLandMode } from './ReserveLandModal';
 
 interface RepresentativeLandDetailsProps {
@@ -13,6 +15,8 @@ interface RepresentativeLandDetailsProps {
   canViewReservationDetails: boolean;
   // Arsa notlarını görme ve not ekleme (Django yönetim panelindeki ayar); müşteri bilgilerinden bağımsız.
   canAddNotes: boolean;
+  // Çağrı merkezi: notları ve arsayı görür, hiçbir işlem yapamaz.
+  readOnly?: boolean;
   onClose: () => void;
   onReserve: (land: RepresentativeLand, mode: ReserveLandMode) => void;
 }
@@ -21,12 +25,13 @@ export default function RepresentativeLandDetails({
   land,
   canViewReservationDetails,
   canAddNotes,
+  readOnly = false,
   onClose,
   onReserve,
 }: RepresentativeLandDetailsProps) {
   const queryClient = useQueryClient();
   // Kapora rezervdeki arsada alınır (kim rezerve etmiş olursa olsun); satışa uygun arsada önce rezerv gerekir.
-  const canTakeDeposit = land.status === 'REZERV' && Boolean(land.can_take_deposit);
+  const canTakeDeposit = !readOnly && land.status === 'REZERV' && Boolean(land.can_take_deposit);
   // Mevcut notlar salt okunur; temsilci yalnızca yeni not ekler (tarih ve kullanıcı adıyla sona yazılır).
   const [existingNotes, setExistingNotes] = useState(land.reservation_notes || '');
   const [newNote, setNewNote] = useState('');
@@ -94,7 +99,14 @@ export default function RepresentativeLandDetails({
             </span>
           </div>
 
-          <LandLocationCard land={land} canEdit={false} />
+          <LandLocationCard land={land} canEdit={false} canSyncTkgm />
+
+          {/* Yapay zekâ ilan araştırması yalnızca çağrı merkezi ekranında. */}
+          {readOnly && (
+            <ErrorBoundary key={land.id} title="İlan metni">
+              <ListingTextPanel land={land} />
+            </ErrorBoundary>
+          )}
 
           {canViewReservationDetails && land.status !== 'BOS' && (
             <section className="space-y-4">
@@ -121,7 +133,7 @@ export default function RepresentativeLandDetails({
               ) : (
                 <p className="text-sm text-slate-400">Bu arsaya henüz not eklenmemiş.</p>
               )}
-              <form
+              {!readOnly && <form
                 onSubmit={event => {
                   event.preventDefault();
                   if (newNote.trim()) mutation.mutate();
@@ -148,7 +160,7 @@ export default function RepresentativeLandDetails({
                   {mutation.isPending ? 'Ekleniyor...' : 'Notu ekle'}
                 </button>
                 <p className="text-[11px] text-slate-400">Not, tarih ve kullanıcı adınızla eklenir; mevcut notlar değiştirilemez.</p>
-              </form>
+              </form>}
             </section>
           ) : (
             <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
@@ -156,9 +168,15 @@ export default function RepresentativeLandDetails({
             </p>
           )}
 
-          {(land.status === 'BOS' || canTakeDeposit) && (
+          {readOnly && (
+            <p className="rounded-xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-800">
+              Çağrı merkezi hesabı yalnızca görüntüleme yetkisine sahiptir; rezerv, kapora ve not işlemleri satış temsilcisi tarafından yapılır.
+            </p>
+          )}
+
+          {((land.status === 'BOS' && !readOnly) || canTakeDeposit) && (
             <div className="space-y-2">
-              {land.status === 'BOS' && (
+              {land.status === 'BOS' && !readOnly && (
                 <button
                   type="button"
                   onClick={() => onReserve(land, 'reserve')}

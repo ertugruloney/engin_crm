@@ -1,7 +1,7 @@
 import axios from 'axios';
 import type { Land, LandStatus } from './types';
 
-export type UserRole = 'admin' | 'sales_representative' | 'sales_support';
+export type UserRole = 'admin' | 'sales_representative' | 'sales_support' | 'call_center';
 
 export interface AppUser {
   id: number;
@@ -69,6 +69,9 @@ export type RepresentativeLand = Pick<
   | 'parcel_sheet'
   | 'parcel_geometry'
   | 'tkgm_synced_at'
+  | 'listing_text'
+  | 'listing_generated_at'
+  | 'listing_imar_detail'
 >>;
 
 export interface RepresentativeSettings {
@@ -77,6 +80,8 @@ export interface RepresentativeSettings {
   max_stage?: 'REZERV' | 'KAPORA_ALINDI';
   // Arsa notlarını görme ve not ekleme (müşteri bilgisi görünürlüğünden bağımsız).
   can_add_notes?: boolean;
+  // Çağrı merkezi: temsilci ekranını görür ama rezerv, kapora ve not işlemi yapamaz.
+  read_only?: boolean;
 }
 
 export interface LandReservation {
@@ -430,6 +435,20 @@ export const updateNotificationSettings = async (
   return data;
 };
 
+export interface FinanceSettings {
+  monthly_interest_rate: string;
+}
+
+export const getFinanceSettings = async (): Promise<FinanceSettings> => {
+  const { data } = await api.get('finance/settings/');
+  return data;
+};
+
+export const updateFinanceSettings = async (monthlyInterestRate: string): Promise<FinanceSettings> => {
+  const { data } = await api.put('finance/settings/', { monthly_interest_rate: monthlyInterestRate });
+  return data;
+};
+
 export type CancelReason =
   | 'fiyat_odeme'
   | 'baska_arsa'
@@ -552,6 +571,24 @@ export interface TkgmNeighborhoodChoice {
   id: number;
   name: string;
 }
+
+/** Satış temsilcisi ve çağrı merkezi: arsanın TKGM bilgilerini getirir (başka alan değişmez). */
+export const syncRepresentativeLandFromTkgm = async (id: number, mahalleId?: number): Promise<RepresentativeLand> => {
+  const { data } = await api.post(`representative/lands/${id}/tkgm-sync/`, mahalleId ? { mahalle_id: mahalleId } : {});
+  return data;
+};
+
+/** Yalnızca çağrı merkezi: arsanın bilgilerinden Claude ile ilan metni üretir ve arsaya kaydeder. */
+/** Çağrı merkezi: belgeden imar detayını arsaya kaydeder. */
+export const updateListingImarDetail = async (id: number, imarDetail: string): Promise<{ listing_imar_detail: string }> => {
+  const { data } = await api.patch(`lands/${id}/listing/imar/`, { listing_imar_detail: imarDetail });
+  return data;
+};
+
+export const generateLandListing = async (id: number): Promise<{ listing_text: string; listing_generated_at: string }> => {
+  const { data } = await api.post(`lands/${id}/listing/`);
+  return data;
+};
 
 export const syncLandFromTkgm = async (id: number, mahalleId?: number): Promise<Land> => {
   const { data } = await api.post(`lands/${id}/tkgm-sync/`, mahalleId ? { mahalle_id: mahalleId } : {});

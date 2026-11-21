@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.core.validators import FileExtensionValidator
 from .customers import normalize_phone, sync_customer_to_lands
 from .center_distances import land_center_distances
+from .finance import installment_loss, monthly_interest_rate
 from .parcel_links import auto_parcel_query_url, neighborhood_templates
 from .tkgm_sync import TKGM_FIELDS
 from .models import CANCEL_DETAIL_CHOICES, CANCEL_DETAILS_BY_REASON, CANCEL_REASON_CHOICES, Customer, CustomerLandRecord, Land, LandStatusHistory
@@ -199,12 +200,15 @@ class RepresentativeLandSerializer(serializers.ModelSerializer):
             'longitude',
             'parcel_query_url',
             'parcel_query_url_auto',
+            'listing_text',
+            'listing_generated_at',
+            'listing_imar_detail',
             'city_center_distance_km',
             'district_center_distance_km',
             'neighborhood_center_distance_km',
             *TKGM_FIELDS,
         ]
-        read_only_fields = ['latitude', 'longitude', 'parcel_query_url', *TKGM_FIELDS]
+        read_only_fields = ['latitude', 'longitude', 'parcel_query_url', 'listing_text', 'listing_generated_at', 'listing_imar_detail', *TKGM_FIELDS]
 
     city_center_distance_km = serializers.SerializerMethodField()
     district_center_distance_km = serializers.SerializerMethodField()
@@ -217,6 +221,14 @@ class RepresentativeLandSerializer(serializers.ModelSerializer):
         Django yönetim panelindeki ayar "yalnızca rezerv" ise hiçbir arsada kapora alınamaz.
         """
         if land.status != 'REZERV':
+            return False
+        # Çağrı merkezi hiçbir arsada kapora alamaz (kullanıcı başına bir kez sorgulanır).
+        if 'is_call_center' not in self.context:
+            from .auth_views import is_call_center
+
+            request = self.context.get('request')
+            self.context['is_call_center'] = request is not None and is_call_center(request.user)
+        if self.context['is_call_center']:
             return False
         allowed = self.context.get('representatives_can_take_deposit')
         if allowed is None:
@@ -300,12 +312,14 @@ class LandSerializer(CancelReasonFields, serializers.ModelSerializer):
     city_center_distance_km = serializers.SerializerMethodField()
     district_center_distance_km = serializers.SerializerMethodField()
     neighborhood_center_distance_km = serializers.SerializerMethodField()
+    # Yalnızca yönetici görür: taksitli satışta aylık faize göre paranın bugünkü değeri ve zarar.
+    installment_loss = serializers.SerializerMethodField()
 
     class Meta:
         model = Land
         fields = '__all__'
         # Müşteri bağlantısı ad/telefondan, TKGM alanları "TKGM'den bilgileri getir" ile otomatik dolar.
-        read_only_fields = ['customer', *TKGM_FIELDS]
+        read_only_fields = ['customer', 'listing_text', 'listing_generated_at', 'listing_imar_detail', *TKGM_FIELDS]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -313,6 +327,14 @@ class LandSerializer(CancelReasonFields, serializers.ModelSerializer):
             for field in ('reservation_date', 'customer', 'customer_name', 'customer_phone', 'reservation_notes'):
                 data.pop(field, None)
         return data
+
+    def get_installment_loss(self, land):
+        request = self.context.get('request')
+        if request is None or not request.user.is_staff:
+            return None
+        if 'monthly_interest_rate' not in self.context:
+            self.context['monthly_interest_rate'] = monthly_interest_rate()
+        return installment_loss(land, self.context['monthly_interest_rate'])
 
     def get_status_history(self, land):
         return LandStatusHistorySerializer(land.status_history.all(), many=True).data

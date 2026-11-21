@@ -43,7 +43,16 @@ const LINK_BUTTON =
   'inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50';
 
 // Arsanın haritadaki yeri ve Tapu Kadastro Parsel Sorgu bağlantısı; satışçı müşteriye doğru yeri gösterir.
-export default function LandLocationCard({ land, canEdit }: { land: LocatableLand; canEdit: boolean }) {
+export default function LandLocationCard({
+  land,
+  canEdit,
+  canSyncTkgm = canEdit,
+}: {
+  land: LocatableLand;
+  canEdit: boolean;
+  // Konumu düzenleyemeyen satış temsilcisi / çağrı merkezi de TKGM bilgilerini getirebilir.
+  canSyncTkgm?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [coordinateText, setCoordinateText] = useState('');
@@ -223,7 +232,7 @@ export default function LandLocationCard({ land, canEdit }: { land: LocatableLan
             </p>
           )}
 
-          <TkgmParcelPanel land={land} canEdit={canEdit} />
+          <TkgmParcelPanel land={land} canEdit={canSyncTkgm} representative={canSyncTkgm && !canEdit} />
 
           <div className="rounded-lg bg-slate-50 p-3">
             <p className="text-xs font-semibold text-slate-500">Tapu Kadastro Parsel Sorgu</p>
